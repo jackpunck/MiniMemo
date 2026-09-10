@@ -18,7 +18,7 @@ use tauri::{AppHandle, Manager};
 /// 否则一律阻止退出以保持后台驻留。
 pub static QUITTING: AtomicBool = AtomicBool::new(false);
 
-pub const DATA_VERSION: u32 = 2;
+pub const DATA_VERSION: u32 = 3;
 
 /// 归档上限。archives 只增不减会随着时间无限膨胀，超出后丢弃最旧的记录。
 const ARCHIVE_LIMIT: usize = 500;
@@ -53,6 +53,23 @@ pub struct Todo {
     /// 换句话说：**不需要迁移，也绝不能把它写成非 0 的默认值**。
     #[serde(default)]
     pub order: i64,
+    /// 这条任务自己的字体链（完整 CSS font-family）。
+    ///
+    /// **必须带字段级 `#[serde(default)]`**：`Todo` 没有容器级 default，老数据里
+    /// 根本没有这个键，解析会直接失败 → `load()` 把 data.json 改名成 .broken →
+    /// 用户看到的是全部待办凭空消失。这是本仓库后果最重的错误。
+    ///
+    /// 空串只可能出现在「用户手改过文件」这种场合，前端会回退到全局字体。
+    /// 正常数据里它一定是被写死的：老任务在 `migrate` 的 v2 → v3 里盖章，
+    /// 新任务在 `add_todo` 里盖章 —— 所以**改全局字体不会牵连任何已有任务**。
+    #[serde(default)]
+    pub font: String,
+    /// 这条任务的字体对应的导入字体 id；系统字体 / 默认字体 / 无法确定时为 None。
+    ///
+    /// 必须单独存下来：导入字体的字节不跨进程缓存，重启后要靠这个 id 重新
+    /// `ensureFont`，否则那条任务会静默回退成默认字体，用户看到的是「字体自己变了」。
+    #[serde(default)]
+    pub font_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,7 +225,66 @@ fn backup_broken(path: &PathBuf) {
     }
 }
 
+/// 把老待办「当时正在用的字体」写死到每一条上（v2 → v3 的一部分）。
+///
+/// 迁移之前字体是全局的，所以迁移这一刻的 `settings.font_family` 就是这些待办
+/// 眼睛看到的字体。写死它，显示效果与升级前逐像素一致；此后再改全局字体，
+/// 它们也不会跟着变 —— 这正是需求要的「只影响新任务」。
+///
+/// 只有 `font` 为空（= 从没盖过章）的才处理，所以重复调用是幂等的。
+fn stamp_missing_todo_fonts(data: &mut AppData) -> usize {
+    // 先把两个值 clone 出来：同一个 data 上不能同时有可变借用和不可变借用
+    let family = data.settings.font_family.clone();
+    let id = data.settings.font_id.clone();
+    let mut n = 0;
+
+    for t in &mut data.todos {
+        if t.font.trim().is_empty() {
+            t.font = family.clone();
+            t.font_id = id.clone();
+            n += 1;
+        }
+    }
+    n
+}
+
+/// 把当前全局字体盖到所有未归档任务上（设置面板的「应用到全部」）。
+///
+/// 注意是**写入**而不是清空。清空看着更省事（空串 = 回退到全局，语义上是等价的），
+/// 但那样用户之后每改一次字体，这些任务又会跟着变 —— 等于「应用到全部」把用户的
+/// 待办打回了「跟随全局」，与这个按钮的用途正好相反。
+///
+/// `archives` 不动：归档条目不再渲染，改了只是徒增体积。
+pub fn apply_font_to_all(data: &mut AppData) -> usize {
+    let family = data.settings.font_family.clone();
+    let id = data.settings.font_id.clone();
+    let mut n = 0;
+
+    for t in &mut data.todos {
+        if t.font != family || t.font_id != id {
+            n += 1;
+        }
+        t.font = family.clone();
+        t.font_id = id.clone();
+    }
+    n
+}
+
 fn migrate(data: &mut AppData) {
+    // 「填空」类的修复要排在版本迁移**前面**：v2 → v3 会拿 settings.font_family
+    // 去给老待办盖章，先把空值补成默认链，否则盖下去的是个空串。
+    //
+    // 老数据可能没有字体链，补上默认值而不是留空（空字符串会让 CSS 整体失效）
+    if data.settings.font_family.trim().is_empty() {
+        data.settings.font_family = DEFAULT_FONT_CHAIN.into();
+    }
+
+    // 同理：颜色为空会让 `color:` 整条声明失效。正常情况下容器级 default 已经
+    // 兜住了，这里防的是手工编辑过的或早期版本写坏的 data.json。
+    if data.settings.text_color.trim().is_empty() {
+        data.settings.text_color = DEFAULT_TEXT_COLOR.into();
+    }
+
     // v1 → v2：遮罩默认值从 0.65 降到 0.28。
     //
     // 之所以敢直接覆盖老用户的取值：`maskOpacity` 和 `blur` 这两个字段虽然一直
@@ -220,20 +296,21 @@ fn migrate(data: &mut AppData) {
         data.settings.mask_opacity = DEFAULT_MASK_OPACITY;
     }
 
+    // v2 → v3：字体从「全局一个」改成「每条任务各自记」。
+    //
+    // 这一步**不能省**。如果只给 `Todo::font` 一个空默认值、靠前端回退到当前的
+    // `settings.font_family`，那用户之后每改一次字体，旧任务还是会一起变 ——
+    // 正是这次要修的那个问题。必须在迁移时把当时的字体钉死。
+    if data.version < 3 {
+        let n = stamp_missing_todo_fonts(data);
+        if n > 0 {
+            info!("已为 {n} 条历史任务固定字体");
+        }
+    }
+
     if data.version < DATA_VERSION {
         info!("数据版本 {} -> {}", data.version, DATA_VERSION);
         data.version = DATA_VERSION;
-    }
-
-    // 老数据可能没有字体链，补上默认值而不是留空（空字符串会让 CSS 整体失效）
-    if data.settings.font_family.trim().is_empty() {
-        data.settings.font_family = DEFAULT_FONT_CHAIN.into();
-    }
-
-    // 同理：颜色为空会让 `color:` 整条声明失效。正常情况下容器级 default 已经
-    // 兜住了，这里防的是手工编辑过的或早期版本写坏的 data.json。
-    if data.settings.text_color.trim().is_empty() {
-        data.settings.text_color = DEFAULT_TEXT_COLOR.into();
     }
 }
 
@@ -380,6 +457,8 @@ mod tests {
             completed_at: None,
             archived_at: None,
             order,
+            font: String::new(),
+            font_id: None,
         }
     }
 
@@ -479,5 +558,172 @@ mod tests {
         migrate(&mut data);
 
         assert_eq!(data.settings.text_color, DEFAULT_TEXT_COLOR);
+    }
+
+    // -----------------------------------------------------------------------
+    // 每条任务自己的字体（v2 → v3）
+    // -----------------------------------------------------------------------
+
+    /// 数据丢失的回归测试：老 todo 没有 font / fontId 两个键。
+    /// `Todo` 没有容器级 default，字段级 `#[serde(default)]` 少一个，
+    /// 整份 data.json 就解析失败，用户的待办会从界面上整体消失。
+    #[test]
+    fn legacy_todo_without_font_parses() {
+        let json = r#"{
+            "id": "t1", "text": "写周报", "completed": false,
+            "createdDate": "2026-01-01", "createdAt": 1, "order": 0
+        }"#;
+
+        let t: Todo = serde_json::from_str(json).expect("老 todo 必须能解析");
+        assert_eq!(t.font, "");
+        assert_eq!(t.font_id, None);
+        assert_eq!(t.text, "写周报");
+    }
+
+    /// 上面那条只覆盖了「裸 Todo」。真正会丢数据的是**整份 AppData + 非空 todos**
+    /// 这条路径 —— 现有测试里没有一条同时具备这两个条件。
+    #[test]
+    fn legacy_appdata_with_todos_parses() {
+        let json = r#"{
+            "version": 2,
+            "settings": { "fontFamily": "\"Consolas\", monospace", "shortcut": "Ctrl+Alt+Space" },
+            "todos": [
+                { "id": "t1", "text": "写周报", "completed": false,
+                  "createdDate": "2026-01-01", "createdAt": 1, "order": 0 },
+                { "id": "t2", "text": "买牛奶", "completed": true,
+                  "createdDate": "2026-01-01", "createdAt": 2, "order": 1 }
+            ],
+            "archives": []
+        }"#;
+
+        let mut data: AppData = serde_json::from_str(json).expect("老数据必须能解析");
+        assert_eq!(data.todos.len(), 2);
+        assert_eq!(data.todos[0].text, "写周报");
+
+        migrate(&mut data);
+
+        assert_eq!(data.todos.len(), 2, "迁移不能让任何一条任务消失");
+        assert_eq!(data.todos[0].font, "\"Consolas\", monospace");
+        assert_eq!(data.todos[1].font, "\"Consolas\", monospace");
+        assert_eq!(data.todos[1].font_id, None);
+    }
+
+    /// 前端读的是 `todo.fontId`，键名一旦变了就静默对不上
+    #[test]
+    fn todo_font_fields_serialize_as_camel_case() {
+        let mut t = todo("a", false, 1, 0);
+        t.font = "\"Consolas\", monospace".into();
+        t.font_id = Some("abc".into());
+
+        let json = serde_json::to_string(&t).unwrap();
+
+        assert!(json.contains("\"fontId\""), "序列化结果缺少 fontId: {json}");
+        assert!(json.contains("\"font\""), "序列化结果缺少 font: {json}");
+    }
+
+    /// 迁移必须把老任务**当时正在用的**字体钉死在它自己身上
+    #[test]
+    fn migrate_stamps_legacy_todos_with_the_font_in_use() {
+        let mut data = AppData {
+            version: 2,
+            ..Default::default()
+        };
+        data.settings.font_family = "\"Consolas\", monospace".into();
+        data.settings.font_id = Some("abc123".into());
+        data.todos.push(todo("a", false, 1, 0));
+        data.todos.push(todo("b", true, 2, 0));
+
+        migrate(&mut data);
+
+        for t in &data.todos {
+            assert_eq!(t.font, "\"Consolas\", monospace");
+            assert_eq!(t.font_id.as_deref(), Some("abc123"));
+        }
+        assert_eq!(data.version, DATA_VERSION);
+    }
+
+    /// **这次改动最核心的一条回归测试**：迁移之后用户再改全局字体，
+    /// 老任务必须原地不动。需求的原文就是「只会影响新的代办」。
+    ///
+    /// 如果哪天有人把 font 的默认值改成「空串 = 跟随当前全局字体」并删掉这个
+    /// 盖章步骤，这条测试会红 —— 那正是要拦住的退化。
+    #[test]
+    fn changing_global_font_after_migration_leaves_old_todos_alone() {
+        let mut data = AppData {
+            version: 2,
+            ..Default::default()
+        };
+        data.todos.push(todo("a", false, 1, 0));
+        migrate(&mut data);
+
+        // 用户随后换成了别的字体
+        data.settings.font_family = "\"Comic Sans MS\", cursive".into();
+
+        assert_eq!(data.todos[0].font, DEFAULT_FONT_CHAIN);
+    }
+
+    /// 已经盖过章的任务不能被后来的迁移覆盖
+    #[test]
+    fn migrate_does_not_restamp_already_stamped_todos() {
+        let mut data = AppData {
+            version: 2,
+            ..Default::default()
+        };
+        data.settings.font_family = "\"Consolas\", monospace".into();
+        data.todos.push(todo("a", false, 1, 0));
+        migrate(&mut data);
+
+        // 模拟迁移被重复执行：版本号退回去，全局字体也换掉
+        data.version = 2;
+        data.settings.font_family = "\"Comic Sans MS\", cursive".into();
+        migrate(&mut data);
+
+        assert_eq!(data.todos[0].font, "\"Consolas\", monospace");
+    }
+
+    /// 「应用到全部」要盖住每一条（含已完成的），且已等于目标值的不计入改写数
+    #[test]
+    fn apply_font_to_all_overwrites_every_todo() {
+        let mut data = AppData::default();
+        data.settings.font_family = "\"Consolas\", monospace".into();
+        data.settings.font_id = Some("abc".into());
+
+        let mut a = todo("a", false, 1, 0);
+        a.font = DEFAULT_FONT_CHAIN.into();
+
+        let mut b = todo("b", true, 2, 0);
+        b.font = DEFAULT_FONT_CHAIN.into();
+        b.font_id = Some("zzz".into());
+
+        let mut c = todo("c", false, 3, 0);
+        c.font = "\"Consolas\", monospace".into();
+        c.font_id = Some("abc".into()); // 已经是目标值
+
+        data.todos = vec![a, b, c];
+
+        let n = apply_font_to_all(&mut data);
+
+        assert_eq!(n, 2, "只有真正被改写的才计数");
+        for t in &data.todos {
+            assert_eq!(t.font, "\"Consolas\", monospace");
+            assert_eq!(t.font_id.as_deref(), Some("abc"));
+        }
+    }
+
+    /// 全局是默认字体（没有导入字体 id）时，「应用到全部」要把 id 一起清掉 ——
+    /// 否则那些任务还会指向一个已经不再生效的导入字体
+    #[test]
+    fn apply_font_to_all_clears_ids_when_back_to_default() {
+        let mut data = AppData::default(); // settings.font_id == None
+
+        let mut a = todo("a", false, 1, 0);
+        a.font = "\"Consolas\", monospace".into();
+        a.font_id = Some("abc".into());
+        data.todos = vec![a];
+
+        apply_font_to_all(&mut data);
+
+        assert_eq!(data.todos[0].font, DEFAULT_FONT_CHAIN);
+        assert_eq!(data.todos[0].font_id, None);
     }
 }

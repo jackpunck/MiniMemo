@@ -4,6 +4,7 @@
 // 绝不拼接 innerHTML —— 输入 `<img src=x onerror=alert(1)>` 必须原样显示。
 
 import { state, call, toast } from './state.js';
+import { isLoaded, DEFAULT_CHAIN } from './fonts.js';
 import { initDrag, cancelDrag } from './dnd.js';
 
 function todayKey() {
@@ -30,6 +31,22 @@ function buildItem(todo) {
   const span = document.createElement('span');
   span.className = 'todo-text';
   span.title = todo.text; // 被省略号截断时，悬停仍可看到全文
+
+  // 每条任务用自己的字体（改全局字体只影响此后新建的任务）。
+  //
+  // 走 inline style 而不是 --note-font 变量：变量是全局的，表达不了「每条不一样」。
+  // inline 的优先级高于 styles.css 里那条 font-family: var(--note-font)，正好盖掉。
+  //
+  // 用 style.setProperty 而不是拼 cssText / setAttribute('style', ...) —— 后者才是
+  // 有注入风险的写法，前者是 CSSOM 属性赋值，非法值会被解析器直接丢弃。
+  const own = (todo.font || '').trim();
+  // 指向导入字体、但字节没注册进来的：写这条链也只会静默回退到链尾的
+  // sans-serif，不如改用全局字体，结果确定。空串同理（没见过，但手改文件可能造出来）。
+  const usable = own && (!todo.fontId || isLoaded(todo.fontId));
+  span.style.setProperty(
+    'font-family',
+    usable ? own : state.data.settings?.fontFamily || DEFAULT_CHAIN,
+  );
 
   // 历史遗留的未完成项（创建日期早于今天）加一个轻量前缀
   const created = todo.createdDate || '';

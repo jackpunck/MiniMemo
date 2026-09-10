@@ -11,7 +11,8 @@ mod window;
 use std::sync::atomic::Ordering;
 
 use log::{error, info, warn};
-use tauri::{Manager, RunEvent, WindowEvent};
+// emit 在 Emitter trait 上，不在 Manager 上 —— 两个都要 use。
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -52,7 +53,9 @@ fn main() {
             commands::remove_font,
             commands::set_font,
             commands::reset_font,
+            commands::apply_font_to_all,
             commands::runtime_info,
+            commands::open_release_page,
             commands::save_window_position,
         ])
         .setup(|app| {
@@ -92,6 +95,18 @@ fn main() {
         .on_window_event(|window, event| match event {
             WindowEvent::Moved(_) => {
                 window::handle_moved(window.app_handle());
+            }
+            // 把系统级的窗口激活状态推给前端，由前端决定「鼠标扫过屏幕边缘
+            // 要不要展开窗口」（需求 1）。
+            //
+            // 这里只发信号、不做决策：收缩要走 state::load（文件 IO），而这个
+            // 回调在主线程上，不能在这里干。emit 只是往 webview 推一条 IPC 消息。
+            //
+            // 用 app_handle().emit 而不是 window.emit：AppHandle 确定实现了
+            // Emitter，不必纠结 Window 那边的 trait 覆盖。整个应用只有一个
+            // webview（label "main"），所以不需要判断来源。
+            WindowEvent::Focused(focused) => {
+                let _ = window.app_handle().emit("minimemo://focus-changed", *focused);
             }
             WindowEvent::CloseRequested { api, .. } => {
                 // ✕ 只隐藏，不退出。真正的退出走托盘菜单。

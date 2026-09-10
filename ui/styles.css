@@ -695,6 +695,21 @@ body.dragging .todo-text {
   -webkit-user-select: text;
 }
 
+/* 检查更新的结果行。这两个是窗口 chrome 的固定配色，和便签正文的
+   --note-* 无关 —— 用户改正文颜色不该影响设置面板的可读性。 */
+#update-status:empty {
+  display: none;
+}
+#update-status[data-kind='error'] {
+  color: #ff9b9b;
+}
+#update-status[data-kind='new'] {
+  color: #86d9a4;
+}
+#update-status[data-kind='ok'] {
+  color: var(--text-dim);
+}
+
 /* -------------------------------------------------------------------- 提示 */
 
 .toast {

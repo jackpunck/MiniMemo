@@ -6,6 +6,7 @@
 //! 标了 `(async)` 的 command 会在线程池上执行 —— 它们都做文件 IO，
 //! 放在主线程上会卡住窗口。
 
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
@@ -123,6 +124,11 @@ pub fn add_todo(app: AppHandle, text: String) -> Result<AppData, String> {
             completed_at: None,
             archived_at: None,
             order,
+            // 新任务把「当前」字体快照到自己身上，此后用户再改全局字体就与它无关了。
+            // 这里能直接读 settings：`mutate` 走的是 state::load，而 migrate 已经
+            // 保证 font_family 非空（空值会被补成 DEFAULT_FONT_CHAIN）。
+            font: data.settings.font_family.clone(),
+            font_id: data.settings.font_id.clone(),
         });
         Ok(())
     })
@@ -504,6 +510,20 @@ pub fn remove_font(app: AppHandle, id: String) -> Result<AppData, String> {
             d.settings.font_id = None;
             d.settings.font_family = state::DEFAULT_FONT_CHAIN.into();
         }
+
+        // 引用了这个字体、但全局字体不是它的那些任务，也得一起清干净。
+        // 字体文件已经删了，再留着那个链就是指向一个注册不进来的 family ——
+        // 浏览器会静默回退到链尾的 sans-serif，用户看到的是「字体自己变了」。
+        // 清空 = 回到「没盖章」状态，前端按全局字体渲染，结果确定。
+        //
+        // 这里只清 todos：archives 不再渲染，留着不影响显示。
+        for t in d.todos.iter_mut() {
+            if t.font_id.as_deref() == Some(id.as_str()) {
+                t.font_id = None;
+                t.font = String::new();
+            }
+        }
+
         Ok(())
     })
 }
@@ -523,12 +543,24 @@ pub fn set_font(app: AppHandle, family: String, id: Option<String>) -> Result<Ap
     })
 }
 
-/// 恢复默认字体。
+/// 恢复默认字体。**只影响此后新建的任务** —— 已有任务把字体记在自己身上了。
 #[tauri::command(async)]
 pub fn reset_font(app: AppHandle) -> Result<AppData, String> {
     mutate(&app, |d| {
         d.settings.font_family = state::DEFAULT_FONT_CHAIN.into();
         d.settings.font_id = None;
+        Ok(())
+    })
+}
+
+/// 把当前字体盖到所有已有任务上（设置面板的「应用到全部」）。
+///
+/// 与 `set_font` 分开是刻意的：那个改的是 settings（影响未来），这个改的是
+/// 每一条 todos（一次批量数据改写）。影响半径完全不同，不该靠一个 bool 分流。
+#[tauri::command(async)]
+pub fn apply_font_to_all(app: AppHandle) -> Result<AppData, String> {
+    mutate(&app, |d| {
+        state::apply_font_to_all(d);
         Ok(())
     })
 }
@@ -559,6 +591,49 @@ pub fn runtime_info(app: AppHandle) -> RuntimeInfo {
         today: state::today_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     }
+}
+
+/// 用系统默认浏览器打开发布页面。
+///
+/// 前端拿不到 `tauri-plugin-opener` 的 JS API（插件是独立 npm 包，而本项目没有
+/// 打包器，`withGlobalTauri` 的全局包里也没有它），而 `<a target="_blank">` 在
+/// Tauri 的 webview 里不会交给系统浏览器 —— 要么没反应，要么直接在 webview 内
+/// 导航、把整个界面顶掉。所以这一步必须落到 Rust。
+#[tauri::command(async)]
+pub fn open_release_page(tag: String) -> Result<(), String> {
+    // `tag` 来自 GitHub API 的响应，是**不可信输入**。它会被拼进一条 cmd 命令行，
+    // 所以拼之前必须把字符集卡死 —— cmd 的元字符（& ^ | < > " 空格）在这里就是
+    // 命令注入。合法版本号只可能是 v1.2.3 / v0.2.0-beta.1 这类形状。
+    let ok = !tag.is_empty()
+        && tag.len() <= 64
+        && tag
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+
+    if !ok {
+        return Err("版本号格式非法".into());
+    }
+
+    let url = format!("https://github.com/jackpunck/MiniMemo/releases/tag/{tag}");
+
+    // `""` 那个空参数是 start 的窗口标题占位。省掉它，start 会把 URL 当成标题，
+    // 结果是弹一个空的 cmd 窗口而不是浏览器。
+    //
+    // 这里用 .args() 而不是 raw_arg：URL 已经过白名单校验，不含空格和引号，
+    // Rust 的 Windows 参数转义不会给它加上任何引号，拼出来的就是
+    // `cmd /C start "" https://…`，正是我们要的。
+    //
+    // CREATE_NO_WINDOW：本进程是 windows_subsystem = "windows"，自己没有控制台。
+    // 不带上这个标志，Windows 会给 cmd.exe 新分配一个控制台 —— 用户眼前会闪一下
+    // 黑框。它只影响 cmd 自己，start 拉起来的浏览器是 GUI 进程，照常有窗口。
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", url.as_str()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开浏览器失败: {e}"))
 }
 
 /// 保存窗口位置。前端在窗口移动后调用；位置校验在 window 模块里做。

@@ -31,6 +31,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 前端没有任何构建步骤：`tauri build` 只是把 ui/ 原样嵌进二进制，不做解析。
+      # 一个 JS 语法错误会**静默地**进安装包，表现成白屏（body.loading 永远揭不开，
+      # 2 秒后由 revealTimer 兜底揭开一个空界面）。这是本仓库最大的验证盲区。
+      #
+      # package.json 里标了 "type": "module"，所以 node 会把 ui/*.js 按 ESM 解析。
+      - name: 前端静态检查
+        shell: bash
+        run: |
+          for f in ui/*.js; do
+            node --check "$f"
+          done
+          node tools/check-commands.mjs
+          node tools/check-version.mjs
+
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
         with:

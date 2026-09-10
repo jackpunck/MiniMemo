@@ -2,6 +2,7 @@
 
 import { state, call, invoke, toast } from './state.js';
 import * as fonts from './fonts.js';
+import { checkUpdate, openReleasePage } from './update.js';
 import {
   TEXT_COLORS,
   applyTextColor,
@@ -13,6 +14,9 @@ import {
 } from './appearance.js';
 
 let filter = '';
+
+/** 当前版本号，由 renderInfo() 从 runtime_info 填。检查更新时用来比对。 */
+let currentVersion = '';
 
 // ---------------------------------------------------------------------------
 // 外观：文字颜色、遮罩、模糊
@@ -274,6 +278,11 @@ async function renderInfo() {
     const dir = document.getElementById('data-dir');
     dir.textContent = info.dataDir || '—';
     dir.title = info.dataDir || '';
+
+    // 版本号的唯一来源是 Rust 的 CARGO_PKG_VERSION，前端不再存第二份
+    const version = document.getElementById('app-version');
+    version.textContent = `MiniMemo v${info.version}`;
+    currentVersion = info.version;
   } catch {
     /* 信息区是锦上添花，失败就不显示 */
   }
@@ -344,6 +353,21 @@ export function initSettings() {
     }
   });
 
+  // 把当前字体盖到所有已有任务上。call() 返回的是完整快照，render 会自动重绘。
+  document.getElementById('btn-font-apply-all').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+
+    try {
+      const data = await call('apply_font_to_all');
+      toast(`已把当前字体应用到 ${data.todos.length} 条任务`);
+    } catch {
+      /* call() 已经弹过提示 */
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   document.getElementById('btn-bg-reset').addEventListener('click', async () => {
     const { resetBackground } = await import('./background.js');
     try {
@@ -355,5 +379,15 @@ export function initSettings() {
 
   document.getElementById('btn-bg-import').addEventListener('click', () => {
     document.getElementById('file-bg').click();
+  });
+
+  // 检查更新。只在用户点的时候联网 —— 不做启动自动检查：那会让「启动就联网」
+  // 成为常态，也会白白消耗 GitHub 对未认证请求的限流额度。
+  document.getElementById('btn-check-update').addEventListener('click', () => {
+    checkUpdate(currentVersion);
+  });
+
+  document.getElementById('btn-open-release').addEventListener('click', () => {
+    openReleasePage();
   });
 }

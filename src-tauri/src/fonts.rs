@@ -218,6 +218,7 @@ pub fn prune_missing(app: &AppHandle, data: &mut state::AppData) -> bool {
     });
 
     let removed = before - data.settings.custom_fonts.len();
+    let mut changed = removed > 0;
 
     if data
         .settings
@@ -231,5 +232,27 @@ pub fn prune_missing(app: &AppHandle, data: &mut state::AppData) -> bool {
         warn!("当前字体文件已丢失，已恢复默认字体");
     }
 
-    removed > 0
+    // 引用了已经不存在的导入字体的任务也要一起清掉。留着那个链就等于指向一个
+    // 永远注册不进来的 family，浏览器会静默回退到链尾的 sans-serif，用户看到的
+    // 是「字体自己变了」。清空 = 回到「没盖章」状态，按全局字体渲染，结果确定。
+    //
+    // 只清 todos：archives 不再渲染，留着不影响显示。
+    // 收成 owned String：这样 known 不借用 data，下面的 iter_mut 就是唯一一个
+    // 活跃的可变借用，借用检查没有任何含糊的余地。（字体就几个，启动时算一次。）
+    let known: std::collections::HashSet<String> = data
+        .settings
+        .custom_fonts
+        .iter()
+        .map(|f| f.id.clone())
+        .collect();
+
+    for t in data.todos.iter_mut() {
+        if t.font_id.as_ref().is_some_and(|id| !known.contains(id)) {
+            t.font_id = None;
+            t.font = String::new();
+            changed = true;
+        }
+    }
+
+    changed
 }

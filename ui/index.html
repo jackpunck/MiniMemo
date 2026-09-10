@@ -23,9 +23,16 @@
   </div>
 
   <div id="app">
+    <!--
+      data-tauri-drag-region 要挂在**真正被点到的那个元素**上，光挂在 header 上不够：
+      Tauri 判断的是事件目标自身带不带这个属性，而 .title 是 flex:1、盖住了标题栏
+      中段，于是能拖的只剩左右两端几个像素的 padding —— 这就是「拖动困难」的根因。
+      现在 .grip 和 .title 各带一份，标题栏上除按钮之外的每一像素都可拖。
+      .actions 里的按钮**一个都不能加**：它们有自己的点击语义，变成拖拽区就点不动了。
+    -->
     <header class="titlebar" data-tauri-drag-region>
-      <span class="grip" aria-hidden="true">⋯</span>
-      <span class="title">MiniMemo</span>
+      <span class="grip" aria-hidden="true" data-tauri-drag-region>⋯</span>
+      <span class="title" data-tauri-drag-region>MiniMemo</span>
       <div class="actions">
         <button id="btn-bg" class="icon-btn" title="更换背景" aria-label="更换背景">🖼</button>
         <button id="btn-settings" class="icon-btn" title="设置" aria-label="打开设置">⚙</button>
@@ -56,13 +63,24 @@
 
   <!-- 设置面板 -->
   <section id="settings" class="settings" hidden aria-label="设置">
-    <header class="settings-head">
-      <span>设置</span>
+    <!--
+      设置面板是 position:fixed; inset:0; z-index:20，打开时整条标题栏都被它盖住，
+      窗口就完全没法拖了。所以面板自己的头部也要能拖 —— 属性同样要挂在被点到的
+      元素上（.settings-head 和里面那个 span）。**面板主体绝不能加**：那里面有
+      搜索框、滑块和可滚动区域，拖拽区会把它们的交互全抢走。
+    -->
+    <header class="settings-head" data-tauri-drag-region>
+      <span data-tauri-drag-region>设置</span>
       <button id="btn-settings-close" class="icon-btn" title="关闭设置" aria-label="关闭设置">✕</button>
     </header>
 
     <div class="settings-body">
-      <div class="field-label">便签文字字体</div>
+      <!--
+        「新任务」而不是「便签文字」：每条任务会把自己创建时的字体记下来，
+        改这里只影响此后新建的任务。措辞必须说清这件事，否则用户会以为
+        选了字体就全局生效。
+      -->
+      <div class="field-label">新任务字体</div>
 
       <div class="font-current" id="font-current">默认字体</div>
 
@@ -77,7 +95,9 @@
       <div class="settings-actions">
         <button id="btn-font-import" class="btn">导入字体文件…</button>
         <button id="btn-font-reset" class="btn">恢复默认字体</button>
+        <button id="btn-font-apply-all" class="btn">应用到全部任务</button>
       </div>
+      <div class="hint">改字体只影响新建的任务，已有的保持原样。</div>
 
       <div class="divider"></div>
 
@@ -118,6 +138,21 @@
 
       <div class="field-label">数据目录</div>
       <div class="hint path" id="data-dir">—</div>
+
+      <div class="divider"></div>
+
+      <div class="field-label">版本</div>
+      <div class="hint" id="app-version">—</div>
+      <div class="settings-actions">
+        <button id="btn-check-update" class="btn">检查更新</button>
+        <!--
+          刻意用 <button> 而不是 <a target="_blank" href="...">：Tauri 的 webview
+          不会把后者交给系统浏览器，要么什么都不做，要么直接在 webview 里导航 ——
+          那会把整个界面顶掉。这里走 Rust 的 open_release_page。
+        -->
+        <button id="btn-open-release" class="btn" hidden>前往下载</button>
+      </div>
+      <div class="hint" id="update-status"></div>
     </div>
   </section>
 
