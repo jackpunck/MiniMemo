@@ -18,11 +18,22 @@ const COLLAPSE_DELAY = 500;
  */
 const DRAG_SAFETY_MS = 20000;
 
+/**
+ * 在输入框里动过手之后的宽限窗口，见 holdWindowOpen。
+ *
+ * 2000 不是新拍的数：v0.1.2 用的就是这个值，实机跑过没问题。连续录入时相邻
+ * 两次按键的间隔远小于它，所以只要还在敲就永远不会收缩。
+ */
+const INPUT_GRACE_MS = 2000;
+
 /** 窗口是不是系统级的当前活动窗口。由 Rust 的 WindowEvent::Focused 推送。 */
 let active = true;
 
 /** 输入框。模块级是因为收缩判据要用它，见 hasPendingInput。 */
 let inputEl = null;
+
+/** 最后一次在输入框里动过手的时刻。 */
+let lastInputAt = Number.NEGATIVE_INFINITY;
 
 /** 用户是不是正按着鼠标拖窗口。拖动期间不自动收缩，见 beginWindowDrag。 */
 let windowDragging = false;
@@ -72,6 +83,29 @@ function why(tag) {
  */
 function hasPendingInput() {
   return !!inputEl && inputEl.value.trim().length > 0;
+}
+
+/**
+ * 现在要不要拦住自动收缩？
+ *
+ * 两个条件，**都必须有**：
+ *
+ * 1. 输入框里有没提交的内容 —— 用户敲了一半搁下去别处，窗口不该带着他的字消失。
+ *    这一条一直挡着，直到他自己清空或提交。
+ * 2. 刚刚在输入框里动过手（`INPUT_GRACE_MS` 之内）—— **回车提交之后那一下的余地**。
+ *
+ * 第二条看着像冗余，其实不是：回车提交走的是 `input.value = ''`（[ui/todos.js](ui/todos.js)
+ * 的 keydown 处理），**程序化赋值不触发 `input` 事件**，那一刻输入框判据会瞬间翻成
+ * 「没有内容」。而收缩定时器一旦被 mouseleave 武装过，就会一直每 500ms 重排程轮询
+ * 下去（见 scheduleCollapse），所以「清空」到「收缩」之间可能只隔几十毫秒 ——
+ * 表现就是用户刚按下回车，窗口立刻收走了。
+ *
+ * 回车本身是 keydown，会刷新第二条，于是「正在连续录入」的整段时间都被护住；
+ * 停手之后宽限期一过，正常收缩恢复。
+ */
+function holdWindowOpen() {
+  if (hasPendingInput()) return true;
+  return performance.now() - lastInputAt < INPUT_GRACE_MS;
 }
 
 function cancelCollapse() {
@@ -141,11 +175,13 @@ function scheduleCollapse() {
   collapseTimer = setTimeout(() => {
     collapseTimer = null;
 
-    // 设置面板开着、输入框里有没提交的内容、或者用户正拖着窗口时不要收缩。
+    // 设置面板开着、输入框那点事还没完（见 holdWindowOpen）、或者用户正拖着
+    // 窗口时不要收缩。
+    //
     // 这里是**重新排程**而不是直接 return：这条 timer 链是自动收缩唯一的触发源，
     // 直接返回等于把它掐断 —— 用户关掉设置面板 / 清空输入框 / 松手之后，窗口就
     // 再也不自动收缩了。重排程本身也构成了对这几个条件的轮询，不需要另开定时器。
-    if (state.ui.settingsOpen || hasPendingInput() || windowDragging) {
+    if (state.ui.settingsOpen || holdWindowOpen() || windowDragging) {
       scheduleCollapse();
       return;
     }
@@ -184,10 +220,11 @@ function setActive(next) {
 
   // 切到别的程序了：若吸附则立刻收缩。
   //
-  // 但输入框里还压着没提交的内容时**不收缩** —— 用户常常是敲了一半切去别处
-  // 抄点东西再回来，把窗口收走等于把他的字一起收走。同理，正拖着窗口时也不收，
+  // 但输入框里还压着没提交的内容、或者刚提交完还在宽限期里时**不收缩** ——
+  // 用户常常是敲了一半切去别处抄点东西再回来，把窗口收走等于把他的字一起收走；
+  // 回车提交之后立刻收走则等于不让人连续录入。同理，正拖着窗口时也不收，
   // 那是同一次操作被拆成了两个事件。
-  if (hasPendingInput() || windowDragging) return;
+  if (holdWindowOpen() || windowDragging) return;
 
   // 复用 set_edge_collapsed 而不是 minimize_to_edge —— 后者在没吸附时会
   // 把窗口整个藏起来，那是灾难；前者没吸附时什么都不做，正合需求。
@@ -213,6 +250,16 @@ export function initWindow() {
   listen('minimemo://focus-changed', (e) => setActive(!!e.payload));
 
   inputEl = document.getElementById('input');
+
+  // 记录「刚刚在输入框里动过手」，给 holdWindowOpen 的第二条用。
+  // 必须挂在输入框上、且必须收 keydown：回车提交走的是程序化清空，
+  // 那条路径不触发 input 事件，只有 keydown 能捕捉到。
+  // compositionstart 是中文输入法的补充 —— 拼音候选阶段不触发 input。
+  for (const ev of ['input', 'keydown', 'compositionstart']) {
+    inputEl.addEventListener(ev, () => {
+      lastInputAt = performance.now();
+    });
+  }
 
   document.getElementById('btn-pin').addEventListener('click', () => {
     const next = !state.data.settings?.alwaysOnTop;
