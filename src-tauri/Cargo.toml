@@ -26,7 +26,13 @@ font-kit = "0.14"
 
 # 日志 facade。后端实现是自带的 logging.rs（写文件），不是 env_logger ——
 # 那个只写 stderr，release 构建下 stderr 无处可去，装出来的包里一行都没有。
-log = "0.4"
+#
+# `features = ["std"]` 不能省：log 0.4 的 [features] 里**没有 default**，
+# 裸写 `log = "0.4"` 等于 std 关闭，`set_boxed_logger` 会被 cfg 掉（它门控在
+# alloc 上，而 `std = ["alloc"]`）。以前这里不需要显式开，是因为 env_logger
+# 依赖 `log/std`、Cargo 的 feature 合并顺带开了 —— 删掉 env_logger 之后
+# 没人开它了，这就是「删一个依赖会悄悄改掉另一个依赖的 feature 集」的实例。
+log = { version = "0.4", features = ["std"] }
 
 [profile.release]
 codegen-units = 1
