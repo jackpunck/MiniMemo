@@ -282,4 +282,11 @@ ui/
 ├── background.js  背景层
 ├── fonts.js       字体加载与应用
 └── settings.js    设置面板
+
+tools/
+├── gen-icons.mjs      生成 src-tauri/icons(零依赖,手写 PNG/ICO)
+└── check-commands.mjs 校验前端 invoke() 与 Rust generate_handler![] 是否对得上
+
+.github/workflows/
+└── build.yml      cargo check + test;打 tag 或手动触发时出包
 ```

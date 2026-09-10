@@ -11,6 +11,13 @@ node_modules/
 # 本地数据（不应提交）
 *.broken
 
+# Windows / 编辑器杂项
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.log
+
 # 设计与参考文档、给 AI 的项目说明，只在本地留着，不进仓库
 /docs/
 /CLAUDE.md
