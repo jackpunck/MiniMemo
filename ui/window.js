@@ -5,12 +5,11 @@ import { focusInput } from './todos.js';
 import { closeSettings, openSettings } from './settings.js';
 
 /**
- * 鼠标离开后延迟收缩，避免在边缘来回移动时反复展开/收缩。
+ * 鼠标离开后延迟最小化。
  *
- * 5 秒是刻意偏长的：窗边经常只是路过（去点别的窗口、瞄一眼时间），
- * 450ms 那种灵敏度会让人觉得窗口在跟自己抢注意力。
+ * 1 秒：够把指针挪到相邻窗口而不误触发，又不会让窗口「赖着不走」。
  */
-const COLLAPSE_DELAY = 5000;
+const COLLAPSE_DELAY = 1000;
 
 let collapseTimer = null;
 
@@ -37,7 +36,16 @@ function scheduleCollapse() {
       scheduleCollapse();
       return;
     }
-    invoke('set_edge_collapsed', { collapsed: true }).catch(() => {});
+
+    // 走 minimize_to_edge，**不是** set_edge_collapsed(true)。
+    //
+    // 后者在窗口没吸附时会直接 return（window.rs 里那句「没吸附就不该有收缩
+    // 行为」），于是「鼠标离开就最小化」实际只在贴着屏幕边缘时才成立 ——
+    // 窗口停在屏幕中间时按什么都没反应，这正是之前那个 bug。
+    //
+    // minimize_to_edge 自己分流：吸附了收缩成感应条，没吸附就隐藏窗口。
+    // 和标题栏那个 — 按钮完全同一个行为，判断也整条留在 Rust 侧做。
+    invoke('minimize_to_edge').catch(() => {});
   }, COLLAPSE_DELAY);
 }
 

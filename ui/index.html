@@ -14,8 +14,13 @@
 </head>
 <!-- class="loading" 先把内容挡住，等 app.js 把字体备好再揭开，避免字体跳变 -->
 <body class="loading">
-  <!-- 自定义背景图层，始终位于内容之下 -->
-  <div id="bg" aria-hidden="true"></div>
+  <!-- 自定义背景图层，始终位于内容之下。
+       三层结构见 styles.css 的 #bg：模糊填充 / 完整图片 / 遮罩。 -->
+  <div id="bg" aria-hidden="true">
+    <div class="bg-layer bg-blur"></div>
+    <div class="bg-layer bg-image"></div>
+    <div class="bg-layer bg-mask"></div>
+  </div>
 
   <div id="app">
     <header class="titlebar" data-tauri-drag-region>

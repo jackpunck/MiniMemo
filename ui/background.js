@@ -21,7 +21,9 @@ function setImageVisible(visible) {
 
 function clearImage() {
   const bg = document.getElementById('bg');
-  bg.style.backgroundImage = '';
+  // 图片写进自定义属性而不是 background-image：清晰层和模糊填充层是**两个**
+  // 元素，同一个 url 要同时喂给它们（见 styles.css 的 .bg-layer）。
+  bg.style.removeProperty('--bg-image');
   setImageVisible(false);
 
   if (objectUrl) {
@@ -50,7 +52,7 @@ export async function applyCurrentBackground() {
     objectUrl = url;
 
     const bg = document.getElementById('bg');
-    bg.style.backgroundImage = `url("${url}")`;
+    bg.style.setProperty('--bg-image', `url("${url}")`);
     setImageVisible(true);
 
     if (previous) URL.revokeObjectURL(previous);

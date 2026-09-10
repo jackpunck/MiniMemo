@@ -10,7 +10,7 @@ MiniMemo 的完整实现已经落地（Rust + Tauri 2.x 后端、vanilla JS 前�
 
 触发条件有个坑：`push` **只监听 `main` 和 `v*` tag**，往别的分支推不会跑任何东西。要拿反馈就开一个到 `main` 的 PR（`pull_request` 会触发），或者手动 `workflow_dispatch`。出包只看 tag 或手动触发。
 
-要分清「CI 绿过」和「验证过了」。**`cargo check` 不链接、不打包、也从不运行程序**，而**程序本身从来没有被真正执行过一次** —— 透明窗口、边缘吸附的命中测试、托盘、全局快捷键、字体渲染全都未经验证。规格 §34 第 6 条：不要因为 CI 绿了就当产品完成。要确认 CI 的实际结果，去仓库的 Actions 页面看，别信文档里的转述。
+要分清「CI 绿过」和「验证过了」。**`cargo check` 不链接、不打包、也从不运行程序。** v0.1.0 已经出包并在实机上跑起来了，第一轮反馈暴露了两个问题（背景图被 `cover` 裁掉、鼠标离开不自动最小化），都已修 —— 但**规格 §27–33 的验收用例还没有被系统性走过**，托盘、全局快捷键、边缘吸附的命中测试都还是未知数。规格 §34 第 6 条：不要因为 CI 绿了就当产品完成。要确认 CI 的实际结果，去仓库的 Actions 页面看，别信文档里的转述。
 
 静态复查能挡住 API 误用（比如修掉的 `TrayIcon::menu()` 并不存在）和并发问题，但**替代不了编译**：trait 约束、泛型实例化、`Send`/`Sync` 之类只有 `cargo check` 说了算。
 
@@ -41,7 +41,7 @@ cargo check          # Rust 侧改动的首选反馈
 cargo test
 ```
 
-**上面这几条在开发机上跑不了**（没有 Rust 工具链）。Rust 侧的反馈现在走 CI：[.github/workflows/build.yml](.github/workflows/build.yml) 的 `check` job 在每次推送和 PR 上跑 `cargo check --all-targets` + `cargo test`；`build` job 只在打 `v*` tag 或手动触发时出 NSIS 安装包，并上传为 artifact / 发布 Release。没在 CI 上跑绿过的改动，一律当作没验证过。
+**上面这几条在开发机上跑不了**（没有 Rust 工具链）。Rust 侧的反馈走 CI：[.github/workflows/build.yml](.github/workflows/build.yml) 的 `check` job 跑 `cargo check --all-targets` + `cargo test`，`build` job 出 NSIS 安装包并上传为 artifact / 发布 Release。**`check` 只在推 `main`、推 `v*` tag 和 PR 上触发** —— 往别的分支推不会跑任何东西。没在 CI 上跑绿过的改动，一律当作没验证过。
 
 没有前端构建步骤，改 `ui/` 下的文件直接生效。`tauri.conf.json` 里没有 `beforeDevCommand`。
 
@@ -109,12 +109,15 @@ cargo test
 
 7. **背景可读性与外观变量**（[ui/appearance.js](ui/appearance.js) + [styles.css](ui/styles.css)）。原来自定义图片是糊的，根因是 `#app` 上的 `backdrop-filter` 在模糊**整个窗口背后**的东西。现在图片模式强制关掉它，改由文字投影 + 颜色选择撑对比度。
 
-   两条必须记住的约束：
+   三条必须记住的约束：
 
    - **用户的文字颜色只写 `--note-*`，绝不碰 `--text` / `--text-dim` / `--text-faint`。** 后者是窗口 chrome（标题栏、设置面板、toast、字体列表）的固定配色 —— 把它们一起改掉，用户选了深色之后设置面板会变成深底深字，**再也改不回来**。
-   - **遮罩浓度只能有一层来源。** 有图片时 `#app` 的 background 必须是 `transparent`、`backdrop-filter` 必须是 `none`，否则会和 `#bg.visible::after` 叠成 `0.25 + 0.75×α`，滑块的读数对不上眼睛看到的东西。同理，无图片时 `#app` 用的是另一个变量 `--app-mask`（固定 0.65），不是 `--mask`（图片遮罩，滑块驱动）—— 混用会让「调图片遮罩」意外改掉默认的亚克力观感。
+   - **遮罩浓度只能有一层来源。** 有图片时 `#app` 的 background 必须是 `transparent`、`backdrop-filter` 必须是 `none`，否则会和 `.bg-mask` 叠成 `0.25 + 0.75×α`，滑块的读数对不上眼睛看到的东西。同理，无图片时 `#app` 用的是另一个变量 `--app-mask`（固定 0.65），不是 `--mask`（图片遮罩，滑块驱动）—— 混用会让「调图片遮罩」意外改掉默认的亚克力观感。
+   - **背景必须是三层独立元素**（`.bg-blur` / `.bg-image` / `.bg-mask`），不能图省事写成 `#bg` 自己的 `background` 加伪元素。`filter` 会作用于**整个子树**，把 `blur()` 写在 `#bg` 上会把上面那层清晰图一起糊掉 —— 那正是最初要修的问题。同理，`background-size` 在清晰层必须是 `contain` 而不是 `cover`：窗口是 280×380 的竖长条，`cover` 对横屏图等于只留中间一条。图片 URL 通过 `--bg-image` 变量同时喂给模糊层和清晰层，见 [ui/background.js](ui/background.js)。
 
    投影方向随文字颜色的亮度自动反转（亮字配暗影、暗字配亮光晕）。少了这一步，用户在暗背景图上选深色正文会比默认白字还难读 —— 颜色选择就从解决问题的工具变成了制造问题的工具。两个滑块互斥：有图片时只显示「背景遮罩」（模糊被 CSS 强制关掉），无图片时只显示「背景模糊」（没有图片可遮）。
+
+8. **鼠标离开自动最小化**（[ui/window.js](ui/window.js) + [commands.rs](src-tauri/src/commands.rs) 的 `minimize_to_edge`）。定时器到点后调的是 `minimize_to_edge`，**不是** `set_edge_collapsed(true)` —— 后者在窗口没吸附时会直接 `return Ok(())`（[window.rs](src-tauri/src/window.rs) 里那句「没吸附就不该有收缩行为」），于是「离开就最小化」实际只在贴着屏幕边缘时成立，窗口停在屏幕中间时完全没反应。`minimize_to_edge` 自己分流：吸附了收缩成感应条，没吸附就隐藏窗口，和标题栏那个 `—` 按钮是同一个行为。
 
 ## 不可违反的行为约定
 

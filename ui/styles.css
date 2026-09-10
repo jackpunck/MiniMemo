@@ -77,9 +77,8 @@ body.loading #bg {
   position: fixed;
   inset: 0;
   border-radius: var(--radius-window);
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
+  /* .bg-blur 故意往外撑了一圈，靠这里裁回圆角窗口内 */
+  overflow: hidden;
   display: none;
 }
 
@@ -87,12 +86,42 @@ body.loading #bg {
   display: block;
 }
 
-/* 自定义图片上必须压一层遮罩，否则极亮或极花的图会让前景完全读不清（§23） */
-#bg.visible::after {
-  content: "";
+/* 背景由三层叠成，DOM 顺序就是叠放顺序：
+
+     1. .bg-blur   同一张图放大铺满 + 模糊，填掉 contain 留出的空白
+     2. .bg-image  完整图片，contain —— 不裁剪、不变形
+     3. .bg-mask   遮罩浓度，由设置面板的滑块驱动
+
+   拆成三个元素而不是「#bg 自己的 background + ::before/::after」：filter 会
+   作用于整个子树，把模糊写在 #bg 上会把上面那层清晰图一起糊掉。 */
+.bg-layer {
   position: absolute;
   inset: 0;
+  background-position: center;
+  background-repeat: no-repeat;
   border-radius: var(--radius-window);
+}
+
+.bg-blur {
+  /* 比窗口大一圈：模糊会让边缘向外淡出，不撑满四边会留下暗边 */
+  inset: -40px;
+  background-image: var(--bg-image, none);
+  background-size: cover;
+  /* 压暗 + 提饱和，让它退成氛围底色，不和中间的图片主体抢注意力 */
+  filter: blur(24px) brightness(0.55) saturate(1.15);
+}
+
+.bg-image {
+  background-image: var(--bg-image, none);
+  /* contain = 整张图可见。原来这里是 cover，语义是「铺满窗口、裁掉多余」，
+     而窗口是 280×380 的竖长条 —— 横屏图塞进去只能剩下中间一条，这就是
+     「只截取了图片的局部」的来源。 */
+  background-size: contain;
+}
+
+/* 自定义图片上必须压一层遮罩，否则极亮或极花的图会让前景完全读不清（§23）。
+   盖住整窗（含模糊填充区），滑块读数才等于眼睛看到的量。 */
+.bg-mask {
   background: var(--mask);
 }
 
@@ -113,9 +142,9 @@ body.loading #bg {
   overflow: hidden;
 }
 
-/* 有自定义图片时，遮罩**只**由 #bg.visible::after 提供。
-   这两个属性都必须清掉：留着 background 会和白底 ::after 叠成两层，
-   实际浓度变成 0.25 + 0.75×α，滑块的读数就对不上眼睛看到的东西；
+/* 有自定义图片时，遮罩**只**由 .bg-mask 那一层提供。
+   这两个属性都必须清掉：留着 background 会和它叠成两层，实际浓度变成
+   0.25 + 0.75×α，滑块的读数就对不上眼睛看到的东西；
    留着 backdrop-filter 则会把用户特意选的图片糊掉 —— 那正是要修的问题。 */
 body.has-image #app {
   background: transparent;
