@@ -271,6 +271,11 @@ fn snap_flush(w: &WebviewWindow, edge: Edge, mon_left: i32, mon_right: i32) {
     }
 }
 
+/// 当前是否吸附在某条边上。最小化按钮据此决定是收缩还是隐藏窗口。
+pub fn is_snapped() -> bool {
+    SNAPPED.lock().unwrap().is_some()
+}
+
 /// 解除吸附：恢复完整宽度并离开边缘。
 pub fn unsnap(app: &AppHandle) -> Result<(), String> {
     let w = main_window(app).ok_or("找不到主窗口")?;

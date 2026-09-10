@@ -8,11 +8,31 @@
   --radius-window: 12px;
   --radius-field: 7px;
 
+  /* 窗口 chrome（标题栏、设置面板、toast）的固定配色。
+     刻意不跟随用户的文字颜色 —— 否则选了深色正文之后，设置面板会变成
+     深底深字，用户再也改不回来。正文另有一套 --note-*。 */
   --text: #f5f5f7;
   --text-dim: rgba(255, 255, 255, 0.6);
   --text-faint: rgba(255, 255, 255, 0.38);
 
-  --mask: rgba(18, 18, 18, 0.65);
+  /* 便签正文前景，用户可配。appearance.js 会覆盖这四个。
+     默认值与 state.rs 的 DEFAULT_TEXT_COLOR 必须一致。 */
+  --note-text: #f5f5f7;
+  --note-text-dim: rgba(245, 245, 247, 0.6);
+  --note-text-faint: rgba(245, 245, 247, 0.4);
+  /* 投影方向由 appearance.js 按文字亮度反转：亮字配暗影，暗字配亮光晕 */
+  --note-shadow: 0 1px 2px rgba(0, 0, 0, 0.7), 0 0 6px rgba(0, 0, 0, 0.35);
+
+  /* 无自定义图片时窗口自身的底色（亚克力基底）。固定值，不给用户调 ——
+     它和下面的 --mask 是两回事，混用会让「调图片遮罩」意外改掉默认观感。 */
+  --app-mask: rgba(18, 18, 18, 0.65);
+  /* 无图片时的亚克力模糊。由设置面板的滑块驱动。 */
+  --app-blur: 6px;
+
+  /* **仅**用于自定义图片之上的遮罩浓度。有图片时 #app 的底色是透明的，
+     所以这个值是所见即所得的单层浓度，滑块的读数就等于眼睛看到的量。 */
+  --mask: rgba(18, 18, 18, 0.28);
+
   --border: rgba(255, 255, 255, 0.13);
   --hover: rgba(255, 255, 255, 0.08);
 
@@ -85,14 +105,21 @@ body.loading #bg {
   height: 100%;
   border-radius: var(--radius-window);
   border: 1px solid var(--border);
-  /* 有自定义图片时底下那层由 #bg 提供，这里只留很薄的一层保证对比度 */
-  background: var(--mask);
-  backdrop-filter: blur(6px);
+  /* 无自定义图片时，这一层同时提供色调和亚克力模糊 —— 模糊的是窗口背后的
+     桌面，是规格 §12.1 的 Mica 模拟。注意底色用的是 --app-mask 而不是
+     --mask：后者是图片遮罩，由滑块驱动，混用会让「调图片」改掉默认观感。 */
+  background: var(--app-mask);
+  backdrop-filter: blur(var(--app-blur));
   overflow: hidden;
 }
 
+/* 有自定义图片时，遮罩**只**由 #bg.visible::after 提供。
+   这两个属性都必须清掉：留着 background 会和白底 ::after 叠成两层，
+   实际浓度变成 0.25 + 0.75×α，滑块的读数就对不上眼睛看到的东西；
+   留着 backdrop-filter 则会把用户特意选的图片糊掉 —— 那正是要修的问题。 */
 body.has-image #app {
-  background: rgba(18, 18, 18, 0.25);
+  background: transparent;
+  backdrop-filter: none;
 }
 
 /* ------------------------------------------------------------------ 标题栏 */
@@ -169,7 +196,9 @@ body.has-image #app {
   border: 1px solid var(--border);
   border-radius: var(--radius-field);
   background: rgba(255, 255, 255, 0.06);
-  color: var(--text);
+  color: var(--note-text);
+  /* 输入框里的字同样压在背景图上，投影强度和列表正文一致 */
+  text-shadow: var(--note-shadow);
   font-family: var(--note-font);
   font-size: 13px;
   outline: none;
@@ -179,7 +208,7 @@ body.has-image #app {
 }
 
 #input::placeholder {
-  color: var(--text-faint);
+  color: var(--note-text-faint);
 }
 
 #input:focus {
@@ -217,10 +246,34 @@ body.has-image #app {
   padding: 5px 6px;
   border-radius: 6px;
   transition: background var(--ease), opacity var(--ease-slow);
+  /* 别让 WebView2 把手势解释成滚动，否则指针事件会被中途取消 */
+  touch-action: none;
 }
 
 .todo:hover {
   background: rgba(255, 255, 255, 0.05);
+}
+
+/* 正在被拖动的那一行。用 z-index 浮起来，让下面让位的行从它身后滑过。 */
+.todo.dragger {
+  position: relative;
+  z-index: 5;
+  background: rgba(255, 255, 255, 0.09);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+/* 让位的行平滑滑过去；拖动中的那一行不能带 transition，否则会跟不上指针 */
+.todo.shifting {
+  transition: transform var(--ease);
+}
+
+/* 拖动中禁止选中，否则 WebView2 会先起一段原生文本选择，比拖动本身还抢眼 */
+body.dragging,
+body.dragging .todo,
+body.dragging .todo-text {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grabbing;
 }
 
 .todo.completed {
@@ -251,11 +304,14 @@ body.has-image #app {
   text-overflow: ellipsis;
   user-select: text;
   -webkit-user-select: text;
+  /* 方案一：图片不做模糊，改由文字投影和颜色选择撑住对比度 */
+  color: var(--note-text);
+  text-shadow: var(--note-shadow);
 }
 
 /* 历史遗留（昨日及更早的未完成项） */
 .todo-text .stale {
-  color: var(--text-faint);
+  color: var(--note-text-faint);
   font-size: 11px;
   margin-right: 4px;
 }
@@ -510,6 +566,95 @@ body.has-image #app {
   height: 1px;
   background: var(--border);
   margin: 12px 0 4px;
+}
+
+/* ---------------------------------------------------- 外观：色块与滑块 */
+
+/* 预设文字颜色。刻意不用 <input type="color">：它会弹系统对话框，
+   在 transparent + alwaysOnTop 的窗口上行为不确定。 */
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform var(--ease), border-color var(--ease), box-shadow var(--ease);
+}
+
+.swatch:hover {
+  transform: scale(1.08);
+}
+
+/* 选中的圈。深色/黑色块靠这圈边框才在深色面板上看得见。 */
+.swatch[aria-checked="true"] {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 5px;
+}
+
+/* .slider-row 是 flex，会盖掉 [hidden] 的默认 display:none，必须显式写回 */
+.slider-row[hidden],
+.field-label[hidden] {
+  display: none;
+}
+
+.slider-value {
+  flex: 0 0 auto;
+  min-width: 34px;
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  /* 数字等宽，拖动时读数不会左右抖动 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* WebView2 是 Chromium，伪元素只用 -webkit- 前缀；
+   appearance 必须写在 input 自身，写在伪元素上无效。 */
+.range {
+  flex: 1 1 auto;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.range::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 11px;
+  height: 11px;
+  /* (轨道高 - 滑块高) / 2，让滑块在轨道上居中 */
+  margin-top: -4px;
+  border: none;
+  border-radius: 50%;
+  background: #d8d8dd;
+}
+
+.range:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.4);
+  outline-offset: 2px;
 }
 
 .hint {

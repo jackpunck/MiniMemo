@@ -1,9 +1,107 @@
 // 设置面板：字体选择、背景、快捷键与数据目录信息。
 
-import { state, invoke, toast } from './state.js';
+import { state, call, invoke, toast } from './state.js';
 import * as fonts from './fonts.js';
+import {
+  TEXT_COLORS,
+  applyTextColor,
+  applyMaskOpacity,
+  applyBlur,
+  DEFAULT_TEXT,
+  DEFAULT_MASK,
+  DEFAULT_BLUR,
+} from './appearance.js';
 
 let filter = '';
+
+// ---------------------------------------------------------------------------
+// 外观：文字颜色、遮罩、模糊
+// ---------------------------------------------------------------------------
+
+function buildSwatches() {
+  const box = document.getElementById('color-swatches');
+  if (!box || box.childElementCount) return;
+
+  const frag = document.createDocumentFragment();
+
+  for (const c of TEXT_COLORS) {
+    const el = document.createElement('button');
+    el.type = 'button';
+    el.className = 'swatch';
+    el.dataset.color = c.value;
+    el.setAttribute('role', 'radio');
+    el.setAttribute('aria-checked', 'false');
+    el.setAttribute('aria-label', c.label);
+    el.title = c.label;
+    // 值来自本地常量而非用户输入，用 style 是安全的
+    el.style.background = c.value;
+
+    el.addEventListener('click', async () => {
+      // 先乐观生效，视觉上零延迟；call() 回来后的 render() 会再写一次（幂等）
+      applyTextColor(c.value);
+      renderAppearancePanel();
+
+      try {
+        await call('set_text_color', { color: c.value });
+      } catch {
+        // 失败就回到真实设置，别把界面留在一个没落盘的颜色上
+        applyTextColor(state.data.settings?.textColor);
+        renderAppearancePanel();
+      }
+    });
+
+    frag.append(el);
+  }
+
+  box.replaceChildren(frag);
+}
+
+/**
+ * 绑定一个滑块。
+ *
+ * `input` 事件在一次拖动里能来几十个，每个都走 command 就是几十次
+ * 「读盘 → 改 → fsync 整份 AppData」。所以拆成两段：input 只改 CSS 变量给即时
+ * 反馈，change（松手 / 键盘调整结束）才落盘。
+ */
+function bindSlider(id, valueId, format, toValue, apply, commit) {
+  const el = document.getElementById(id);
+  const label = document.getElementById(valueId);
+
+  el.addEventListener('input', () => {
+    const v = Number(el.value);
+    label.textContent = format(v);
+    apply(toValue(v));
+  });
+
+  el.addEventListener('change', () => {
+    commit(toValue(Number(el.value)));
+  });
+}
+
+/** 打开面板时把控件同步到真实设置。applyAppearance 负责反向的 CSS 同步。 */
+function renderAppearancePanel() {
+  const s = state.data.settings || {};
+
+  const mask = Number.isFinite(s.maskOpacity) ? s.maskOpacity : DEFAULT_MASK;
+  const maskEl = document.getElementById('mask-opacity');
+  maskEl.value = String(Math.round(mask * 100));
+  document.getElementById('mask-opacity-value').textContent = `${maskEl.value}%`;
+
+  const blur = Number.isFinite(s.blur) ? s.blur : DEFAULT_BLUR;
+  const blurEl = document.getElementById('blur-level');
+  blurEl.value = String(Math.round(blur));
+  document.getElementById('blur-level-value').textContent = `${blurEl.value}px`;
+
+  // 显示出来的必须是归一化后的当前色（可能与用户点的不完全一致）
+  const current = parseCurrentColor(s.textColor);
+  for (const el of document.querySelectorAll('#color-swatches .swatch')) {
+    el.setAttribute('aria-checked', String(el.dataset.color === current));
+  }
+}
+
+function parseCurrentColor(value) {
+  return TEXT_COLORS.some((c) => c.value === value) ? value : DEFAULT_TEXT;
+}
 
 // ---------------------------------------------------------------------------
 // 字体列表
@@ -150,6 +248,7 @@ export function openSettings() {
   }
 
   updateCurrentLabel();
+  renderAppearancePanel();
   renderInfo();
 }
 
@@ -183,6 +282,28 @@ async function renderInfo() {
 export function initSettings() {
   document.getElementById('btn-settings').addEventListener('click', toggleSettings);
   document.getElementById('btn-settings-close').addEventListener('click', closeSettings);
+
+  // 外观控件。色块只需建一次，之后靠 renderAppearancePanel 同步选中态。
+  buildSwatches();
+  // 落盘写成显式的 call('...') 字面量而不是把命令名当参数传：
+  // tools/check-commands.mjs 靠正则扫这个字面量，传参形式会让这两个名字
+  // 悄悄逃过「未注册 command」的静态校验。
+  bindSlider(
+    'mask-opacity',
+    'mask-opacity-value',
+    (v) => `${v}%`,
+    (v) => v / 100, // 滑块用整数百分比，存的是 0–0.95
+    applyMaskOpacity,
+    (value) => call('set_mask_opacity', { value }).catch(() => {}),
+  );
+  bindSlider(
+    'blur-level',
+    'blur-level-value',
+    (v) => `${v}px`,
+    (v) => v,
+    applyBlur,
+    (value) => call('set_blur', { value }).catch(() => {}),
+  );
 
   document.getElementById('font-search').addEventListener('input', (e) => {
     filter = e.target.value;

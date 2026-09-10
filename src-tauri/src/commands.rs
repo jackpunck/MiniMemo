@@ -109,6 +109,10 @@ pub fn add_todo(app: AppHandle, text: String) -> Result<AppData, String> {
     }
 
     mutate(&app, |data| {
+        // 新任务排到最前：取全局最小 order 再减一。含已完成项一起取最小，
+        // 结果一定小于所有未完成项，排序后必然落在未完成组的顶部。
+        let order = data.todos.iter().map(|t| t.order).min().unwrap_or(0) - 1;
+
         data.todos.push(state::Todo {
             id: new_id("todo"),
             text,
@@ -118,7 +122,39 @@ pub fn add_todo(app: AppHandle, text: String) -> Result<AppData, String> {
             created_at: state::now_ms(),
             completed_at: None,
             archived_at: None,
+            order,
         });
+        Ok(())
+    })
+}
+
+/// 按前端给出的显示顺序重写排序键。
+///
+/// `ids` 只包含**未完成**的任务：排序键以 `completed` 打头，已完成项永远沉底，
+/// 所以拖动跨不过这条边界，让它们参与排序在语义上没有意义。
+///
+/// 未出现在 `ids` 里的任务（已完成项、并发新增的、并发归档的）会被接在末尾并
+/// 保持原有相对次序 —— 这样残缺或过期的列表只会降级，不会报错、不会交错。
+#[tauri::command(async)]
+pub fn reorder_todos(app: AppHandle, ids: Vec<String>) -> Result<AppData, String> {
+    mutate(&app, |data| {
+        for (pos, id) in ids.iter().enumerate() {
+            if let Some(i) = data.todos.iter().position(|t| &t.id == id) {
+                data.todos[i].order = pos as i64;
+            }
+        }
+
+        // 剩下的接在末尾。n 一定大于上面写进去的最大下标，两组区间不会交错；
+        // 完成后 `mutate` 结尾还会再 sort 一次，所以这里必须交出 sort 的不动点。
+        let n = data.todos.len() as i64;
+        let mut rest: Vec<usize> = (0..data.todos.len())
+            .filter(|&i| !ids.iter().any(|id| id == &data.todos[i].id))
+            .collect();
+        rest.sort_by_key(|&i| data.todos[i].order);
+        for (k, i) in rest.into_iter().enumerate() {
+            data.todos[i].order = n + k as i64;
+        }
+
         Ok(())
     })
 }
@@ -198,6 +234,20 @@ pub fn set_edge_collapsed(app: AppHandle, collapsed: bool) -> Result<(), String>
 #[tauri::command(async)]
 pub fn unsnap_window(app: AppHandle) -> Result<(), String> {
     window::unsnap(&app)
+}
+
+/// 标题栏的最小化按钮：已吸附就收缩成边缘感应条，没吸附就退化为隐藏窗口。
+///
+/// 「当前是否吸附」整个判断留在 Rust 侧，前端不参与 —— 否则前端得先问一次、
+/// 再调一次，中间那个往返窗口期里用户刚按过的 Esc 会让它拿着过期状态做错事。
+#[tauri::command(async)]
+pub fn minimize_to_edge(app: AppHandle) -> Result<(), String> {
+    if window::is_snapped() {
+        window::set_edge_collapsed(&app, true)
+    } else {
+        window::hide(&app);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +337,74 @@ pub fn read_background(app: AppHandle) -> Result<Response, String> {
     let path = state::data_dir(&app)?.join(&name);
     let bytes = std::fs::read(&path).map_err(|e| format!("读取背景失败: {e}"))?;
     Ok(Response::new(bytes))
+}
+
+// ---------------------------------------------------------------------------
+// 外观
+// ---------------------------------------------------------------------------
+
+/// 归一化 `#rgb` / `#rrggbb`（大小写不限）成小写 `#rrggbb`，其余一律拒绝。
+///
+/// 这个值最终会进 CSS 变量。前端虽然只给预设色块，但 command 是公开的 IPC 入口，
+/// 不能假设调用方是自家界面 —— 放行任意字符串等于开了个 CSS 注入口子。
+fn normalize_hex_color(input: &str) -> Option<String> {
+    let hex = input.trim().strip_prefix('#')?;
+    if hex.len() != 3 && hex.len() != 6 {
+        return None;
+    }
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    if hex.len() == 3 {
+        // #abc → #aabbcc
+        let mut out = String::with_capacity(7);
+        out.push('#');
+        for c in hex.chars() {
+            let c = c.to_ascii_lowercase();
+            out.push(c);
+            out.push(c);
+        }
+        Some(out)
+    } else {
+        Some(format!("#{}", hex.to_ascii_lowercase()))
+    }
+}
+
+/// 设置便签正文颜色。投影方向由前端按这个颜色的亮度自动反转。
+#[tauri::command(async)]
+pub fn set_text_color(app: AppHandle, color: String) -> Result<AppData, String> {
+    let color = normalize_hex_color(&color).ok_or("颜色格式无效，只接受 #rgb 或 #rrggbb")?;
+
+    mutate(&app, |d| {
+        d.settings.text_color = color.clone();
+        Ok(())
+    })
+}
+
+#[tauri::command(async)]
+pub fn set_mask_opacity(app: AppHandle, value: f64) -> Result<AppData, String> {
+    // NaN 的 clamp 结果是 NaN，落盘会变成 JSON null。提前挡住。
+    let v = if value.is_finite() {
+        value.clamp(0.0, 0.95)
+    } else {
+        state::DEFAULT_MASK_OPACITY
+    };
+
+    mutate(&app, |d| {
+        d.settings.mask_opacity = v;
+        Ok(())
+    })
+}
+
+#[tauri::command(async)]
+pub fn set_blur(app: AppHandle, value: f64) -> Result<AppData, String> {
+    let v = if value.is_finite() { value.clamp(0.0, 24.0) } else { 0.0 };
+
+    mutate(&app, |d| {
+        d.settings.blur = v;
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -451,4 +569,33 @@ pub fn save_window_position(app: AppHandle, x: i32, y: i32) -> Result<(), String
         Ok(())
     })
     .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_hex_color;
+
+    #[test]
+    fn normalizes_valid_hex() {
+        assert_eq!(normalize_hex_color("#ABC").as_deref(), Some("#aabbcc"));
+        assert_eq!(normalize_hex_color("#F5F5F7").as_deref(), Some("#f5f5f7"));
+        assert_eq!(normalize_hex_color(" #fff ").as_deref(), Some("#ffffff"));
+    }
+
+    /// 这个值会直接进 CSS，放行任意字符串等于开了个注入口子
+    #[test]
+    fn rejects_anything_else() {
+        for bad in [
+            "red",          // 颜色关键字
+            "#gg0000",      // 非十六进制
+            "#ff00",        // 长度不对
+            "#ff00008",     // 长度不对
+            "",             // 空
+            "#",            // 只有井号
+            "1b1b1f",       // 缺井号
+            "#ff0000;}",    // 想结束声明再补一条
+        ] {
+            assert!(normalize_hex_color(bad).is_none(), "{bad:?} 不该被接受");
+        }
+    }
 }

@@ -4,6 +4,7 @@
 // 原图，背景也不会失效（规格 §12.3）。这里只负责把字节取回来显示。
 
 import { invoke, state, toast } from './state.js';
+import { applyAppearance } from './appearance.js';
 
 let objectUrl = null;
 
@@ -11,6 +12,11 @@ function setImageVisible(visible) {
   const bg = document.getElementById('bg');
   bg.classList.toggle('visible', visible);
   document.body.classList.toggle('has-image', visible);
+
+  // 有图/无图决定了哪几个外观滑块有意义（见 appearance.js），换了背景就得重算。
+  // 这一句不能挪进 render()：图片是异步取回来的，render() 跑完之后才能确定
+  // body.has-image 到底有没有落上。
+  applyAppearance(state.data.settings || {});
 }
 
 function clearImage() {

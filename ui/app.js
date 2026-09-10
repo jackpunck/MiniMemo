@@ -6,10 +6,23 @@ import { initBackground, applyCurrentBackground } from './background.js';
 import { initSettings } from './settings.js';
 import { initWindow, renderWindowUI } from './window.js';
 import { applyCurrentFont } from './fonts.js';
+import { applyAppearance } from './appearance.js';
+import { isDragging } from './dnd.js';
 
 function render() {
+  // 拖动进行中不能重绘。renderList 会 replaceChildren，把正在拖的 li 从 DOM
+  // 摘掉 —— 元素一移除，pointer capture 就被隐式释放，后续 pointerup 不再投递，
+  // 于是 reorder_todos 永远不会被调用，用户看到一行卡在半路。
+  //
+  // 这里不需要记一笔「待补渲染」：拖动结束的每条路径都会再触发一次 render
+  // （成功走 call 返回的 setData，取消走 notify），而 render 每次都从
+  // state.data 重新读，不会漏掉拖动期间到达的其它变更。
+  if (isDragging()) return;
+
   renderList();
   renderWindowUI();
+  // 每次 command 返回都会走到这里，所以 applyAppearance 必须是幂等的
+  applyAppearance(state.data.settings || {});
 }
 
 async function boot() {

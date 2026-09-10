@@ -4,8 +4,13 @@ import { invoke, call, state } from './state.js';
 import { focusInput } from './todos.js';
 import { closeSettings, openSettings } from './settings.js';
 
-/** 鼠标离开后延迟收缩，避免在边缘来回移动时反复展开/收缩。 */
-const COLLAPSE_DELAY = 450;
+/**
+ * 鼠标离开后延迟收缩，避免在边缘来回移动时反复展开/收缩。
+ *
+ * 5 秒是刻意偏长的：窗边经常只是路过（去点别的窗口、瞄一眼时间），
+ * 450ms 那种灵敏度会让人觉得窗口在跟自己抢注意力。
+ */
+const COLLAPSE_DELAY = 5000;
 
 let collapseTimer = null;
 
@@ -25,8 +30,13 @@ function expand() {
 function scheduleCollapse() {
   cancelCollapse();
   collapseTimer = setTimeout(() => {
-    // 设置面板开着的时候不要收缩，否则用户点不到
-    if (state.ui.settingsOpen) return;
+    // 设置面板开着的时候不要收缩，否则用户点不到。
+    // 这里是**重新排程**而不是直接 return：这条 timer 链是自动收缩唯一的触发源，
+    // 直接返回等于把它掐断 —— 用户关掉设置面板之后，窗口就再也不自动收缩了。
+    if (state.ui.settingsOpen) {
+      scheduleCollapse();
+      return;
+    }
     invoke('set_edge_collapsed', { collapsed: true }).catch(() => {});
   }, COLLAPSE_DELAY);
 }
@@ -51,6 +61,13 @@ export function initWindow() {
   document.getElementById('btn-pin').addEventListener('click', () => {
     const next = !state.data.settings?.alwaysOnTop;
     call('set_always_on_top', { value: next }).catch(() => {});
+  });
+
+  document.getElementById('btn-min').addEventListener('click', () => {
+    // 已吸附就收缩成边缘感应条，没吸附就隐藏窗口。这个分流整个在 Rust 侧做
+    // （minimize_to_edge），前端不先问一次再调一次 —— 中间那个往返窗口期里
+    // 状态可能已经变了（比如刚按过 Esc），前端会拿着过期判断做错事。
+    invoke('minimize_to_edge').catch(() => {});
   });
 
   document.getElementById('btn-hide').addEventListener('click', () => {
