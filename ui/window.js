@@ -12,22 +12,22 @@ import { closeSettings, openSettings } from './settings.js';
 const COLLAPSE_DELAY = 500;
 
 /**
- * 「正在输入」的判定窗口：距最后一次敲键不到这么久，就当作还在打字。
- *
- * 不能用 `document.activeElement === #input` 来判断 —— 输入框在启动时和每次
- * 添加后都会被 `focusInput()` 聚焦，那个判断几乎恒为真，会让自动收缩永久失效。
- * 用「最近敲过键」则天然会衰减。
- *
- * 偏低会把用户打到一半的窗口收走，偏高只是收得晚一点而已，所以宁可偏大。
+ * 拖动兜底时长。Windows 的原生移动循环期间页面收不到任何鼠标事件，松开时那个
+ * mouseup 根本到不了我们手里，只能靠它兜住「清位信号永远不来」的情形
+ * （比如松手时指针已经在窗口外）。
  */
-const TYPING_HOLD_MS = 2000;
+const DRAG_SAFETY_MS = 20000;
 
 /** 窗口是不是系统级的当前活动窗口。由 Rust 的 WindowEvent::Focused 推送。 */
 let active = true;
 
-/** 最后一次在输入框里敲键的时刻。-Infinity = 从没敲过（见 isTyping 的注释）。 */
-let lastTypingAt = Number.NEGATIVE_INFINITY;
+/** 输入框。模块级是因为收缩判据要用它，见 hasPendingInput。 */
+let inputEl = null;
 
+/** 用户是不是正按着鼠标拖窗口。拖动期间不自动收缩，见 beginWindowDrag。 */
+let windowDragging = false;
+
+let dragSafetyTimer = null;
 let collapseTimer = null;
 
 /**
@@ -44,6 +44,36 @@ function enqueue(op) {
   return opChain;
 }
 
+/**
+ * 记日志用的原因串。
+ *
+ * 收缩是个不可复现的 bug 的多发地：事后只看 Rust 日志知道「窗口缩了」，但不知道
+ * 是**哪条路径**缩的。把前端这三个判据一并带过去，下一次复现就能直接读出来。
+ * 只用于记录，Rust 侧不拿它做任何分支。
+ */
+function why(tag) {
+  return `${tag}(active=${active},pending=${hasPendingInput()},drag=${windowDragging})`;
+}
+
+/**
+ * 输入框里有没有还没提交的内容。
+ *
+ * 有就不自动收缩 —— 用户敲了一半正要去别处查个东西，窗口不该带着他的字一起消失。
+ *
+ * 判据是**输入框里有没有东西**，不是「最近有没有敲键盘」：后者答的是「此刻在不在
+ * 打字」，敲完停手一会儿保护就失效了，正好漏掉「写了一半搁下不管」这个真实场景。
+ * 也就是说这里读的是意图的**结果**，不是意图发生的时间。
+ *
+ * 不能用 `document.activeElement === #input` 代替 —— 输入框在启动时和每次添加后
+ * 都会被 `focusInput()` 聚焦，那个判断几乎恒为真，会让自动收缩永久失效。
+ *
+ * 清空或提交之后不需要任何额外的唤醒动作：定时器到点会把自己重新排程，那本身就是
+ * 一次轮询，下一个 tick 就会恢复正常收缩。
+ */
+function hasPendingInput() {
+  return !!inputEl && inputEl.value.trim().length > 0;
+}
+
 function cancelCollapse() {
   if (collapseTimer) {
     clearTimeout(collapseTimer);
@@ -52,14 +82,15 @@ function cancelCollapse() {
 }
 
 /** 展开到正常尺寸。未吸附时 Rust 侧会直接返回，不需要前端先判断。 */
-function expand() {
+function expand(reason) {
   cancelCollapse();
-  enqueue(() => invoke('set_edge_collapsed', { collapsed: false }));
+  enqueue(() => invoke('set_edge_collapsed', { collapsed: false, reason: why(reason) }));
 }
 
 /** 收缩成边缘感应条。**只在已吸附时有效**，没吸附时 Rust 侧是 no-op。 */
-function setCollapsed(collapsed) {
-  enqueue(() => invoke('set_edge_collapsed', { collapsed }));
+function setCollapsed(collapsed, reason) {
+  const r = why(reason);
+  enqueue(() => invoke('set_edge_collapsed', { collapsed, reason: r }));
 }
 
 /**
@@ -67,12 +98,42 @@ function setCollapsed(collapsed) {
  *
  * 和标题栏那个 — 按钮是同一个行为，所以走同一个入口。
  */
-function collapseToEdge() {
-  enqueue(() => invoke('minimize_to_edge'));
+function collapseToEdge(reason) {
+  const r = why(reason);
+  enqueue(() => invoke('minimize_to_edge', { reason: r }));
 }
 
-function isTyping() {
-  return performance.now() - lastTypingAt < TYPING_HOLD_MS;
+/**
+ * 用户开始拖窗口了。
+ *
+ * `data-tauri-drag-region` 由 Tauri 注入的脚本处理，JS 侧本来一个监听器都没有；
+ * 我们只需要知道「拖动开始了」这一件事，因为拖动是**唯一**一段前端收不到鼠标
+ * 事件的时间 —— 原生移动循环会把它们全吞掉。
+ *
+ * 后果就是：拖动开始时那次 mouseleave 武装的收缩定时器，会在用户还按着鼠标的时候
+ * 照常到点，把窗口从他手里收成感应条（吸附状态下 minimize_to_edge 走的是收缩
+ * 分支而不是隐藏，所以看起来像「程序直接关闭」）。
+ */
+function beginWindowDrag() {
+  if (windowDragging) return;
+  windowDragging = true;
+  dragSafetyTimer = setTimeout(endWindowDrag, DRAG_SAFETY_MS);
+}
+
+/**
+ * 拖动结束了。
+ *
+ * 清位信号有好几路（mouseup / pointerup / 指针已松开 / 窗口失焦 / 兜底超时），
+ * 因为正常那一路（mouseup）恰恰是最不可靠的：走原生移动循环时它不会到达页面。
+ * 任何一路先到都算数。
+ */
+function endWindowDrag() {
+  if (!windowDragging) return;
+  windowDragging = false;
+  if (dragSafetyTimer) {
+    clearTimeout(dragSafetyTimer);
+    dragSafetyTimer = null;
+  }
 }
 
 function scheduleCollapse() {
@@ -80,11 +141,11 @@ function scheduleCollapse() {
   collapseTimer = setTimeout(() => {
     collapseTimer = null;
 
-    // 设置面板开着、或者用户正在打字时不要收缩。
+    // 设置面板开着、输入框里有没提交的内容、或者用户正拖着窗口时不要收缩。
     // 这里是**重新排程**而不是直接 return：这条 timer 链是自动收缩唯一的触发源，
-    // 直接返回等于把它掐断 —— 用户关掉设置面板 / 停手之后，窗口就再也不自动收缩了。
-    // 重排程本身也构成了「打字是否还在继续」的轮询，不需要另开定时器。
-    if (state.ui.settingsOpen || isTyping()) {
+    // 直接返回等于把它掐断 —— 用户关掉设置面板 / 清空输入框 / 松手之后，窗口就
+    // 再也不自动收缩了。重排程本身也构成了对这几个条件的轮询，不需要另开定时器。
+    if (state.ui.settingsOpen || hasPendingInput() || windowDragging) {
       scheduleCollapse();
       return;
     }
@@ -96,7 +157,7 @@ function scheduleCollapse() {
     // 窗口停在屏幕中间时按什么都没反应，这正是之前那个 bug。
     //
     // minimize_to_edge 自己分流：吸附了收缩成感应条，没吸附就隐藏窗口。
-    collapseToEdge();
+    collapseToEdge('mouseleave-timer');
   }, COLLAPSE_DELAY);
 }
 
@@ -113,16 +174,24 @@ function scheduleCollapse() {
 function setActive(next) {
   active = next;
 
+  cancelCollapse();
+
   if (next) {
     // 用户切回来了：保持出现
-    expand();
-  } else {
-    // 切到别的程序了：若吸附则立刻收缩。
-    // 复用 set_edge_collapsed 而不是 minimize_to_edge —— 后者在没吸附时会
-    // 把窗口整个藏起来，那是灾难；前者没吸附时什么都不做，正合需求。
-    cancelCollapse();
-    setCollapsed(true);
+    expand('focus-gained');
+    return;
   }
+
+  // 切到别的程序了：若吸附则立刻收缩。
+  //
+  // 但输入框里还压着没提交的内容时**不收缩** —— 用户常常是敲了一半切去别处
+  // 抄点东西再回来，把窗口收走等于把他的字一起收走。同理，正拖着窗口时也不收，
+  // 那是同一次操作被拆成了两个事件。
+  if (hasPendingInput() || windowDragging) return;
+
+  // 复用 set_edge_collapsed 而不是 minimize_to_edge —— 后者在没吸附时会
+  // 把窗口整个藏起来，那是灾难；前者没吸附时什么都不做，正合需求。
+  setCollapsed(true, 'focus-lost');
 }
 
 /** 置顶按钮的视觉状态要跟着真实设置走，而不是跟着点击动作走。 */
@@ -143,6 +212,8 @@ export function initWindow() {
   listen('minimemo://open-settings', () => openSettings());
   listen('minimemo://focus-changed', (e) => setActive(!!e.payload));
 
+  inputEl = document.getElementById('input');
+
   document.getElementById('btn-pin').addEventListener('click', () => {
     const next = !state.data.settings?.alwaysOnTop;
     call('set_always_on_top', { value: next }).catch(() => {});
@@ -152,22 +223,32 @@ export function initWindow() {
     // 已吸附就收缩成边缘感应条，没吸附就隐藏窗口。这个分流整个在 Rust 侧做
     // （minimize_to_edge），前端不先问一次再调一次 —— 中间那个往返窗口期里
     // 状态可能已经变了（比如刚按过 Esc），前端会拿着过期判断做错事。
-    collapseToEdge();
+    //
+    // 用户主动按的，不受输入框内容或拖动状态的影响。
+    collapseToEdge('min-btn');
   });
 
   document.getElementById('btn-hide').addEventListener('click', () => {
-    // ✕ 只隐藏窗口，不退出进程 —— 退出只能走托盘菜单
-    call('hide_window').catch(() => {});
+    // ✕ 只隐藏窗口，不退出进程 —— 退出只能走托盘菜单。同样是用户主动动作。
+    call('hide_window', { reason: why('hide-btn') }).catch(() => {});
   });
 
-  // 记录「用户刚刚在打字」。compositionstart 是中文输入法必需的补充：
-  // 拼音的候选阶段不会触发 input 事件。
-  const input = document.getElementById('input');
-  for (const ev of ['input', 'keydown', 'compositionstart']) {
-    input.addEventListener(ev, () => {
-      lastTypingAt = performance.now();
-    });
+  // 拖动窗口的开始 / 结束。置位看的是事件目标带不带拖拽区属性，用 closest
+  // 是因为 .title 盖住了 .titlebar 中段，光判断目标自身会漏掉一部分。
+  // 注意 Tauri 的注入脚本也监听 mousedown，两边各收各的、互不干扰。
+  document.addEventListener('mousedown', (e) => {
+    if (e.target?.closest?.('[data-tauri-drag-region]')) beginWindowDrag();
+  });
+
+  for (const ev of ['mouseup', 'pointerup', 'pointercancel']) {
+    document.addEventListener(ev, endWindowDrag);
   }
+  // 原生移动循环结束之后，页面收到的第一个事件就是它 —— 指针已经松开。
+  // 拖动期间收不到事件，所以这条不会误清位。
+  document.addEventListener('mousemove', (e) => {
+    if (e.buttons === 0) endWindowDrag();
+  });
+  window.addEventListener('blur', endWindowDrag);
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
@@ -177,10 +258,11 @@ export function initWindow() {
       return;
     }
 
-    // 吸附状态下先脱离边缘，否则窗口收成一条缝后很难再抓回来
+    // 吸附状态下先脱离边缘，否则窗口收成一条缝后很难再抓回来。
+    // 用户主动按的，不受输入框内容或拖动状态的影响。
     invoke('unsnap_window')
       .catch(() => {})
-      .finally(() => call('hide_window').catch(() => {}));
+      .finally(() => call('hide_window', { reason: why('escape') }).catch(() => {}));
   });
 
   // 边缘吸附：窗口缩成感应条后，鼠标进入即展开。
@@ -189,9 +271,16 @@ export function initWindow() {
   // 鼠标恰好划过窗口再离开，会走到 minimize_to_edge 的「没吸附」分支把窗口
   // 整个隐藏掉 —— 那正是需求 1 要消灭的同一类骚扰。
   document.documentElement.addEventListener('mouseenter', () => {
-    if (active) expand();
+    if (active) expand('hover');
   });
-  document.documentElement.addEventListener('mouseleave', () => {
+  document.documentElement.addEventListener('mouseleave', (e) => {
+    // 鼠标键还按着 = 用户在拖东西（拖窗口，或者拖待办排序），不是「离开」。
+    //
+    // 这道判断不依赖任何状态机，是 windowDragging 之外的冗余保险：拖窗口走的是
+    // 同一段代码，而真正的根因还没被证实，多盖一层比少盖一层划算。它只做抑制 ——
+    // 即使 WebView2 下 e.buttons 不可靠，也只是退回没有这道保险的行为。
+    if (e.buttons !== 0) return;
+
     if (active) scheduleCollapse();
   });
 }

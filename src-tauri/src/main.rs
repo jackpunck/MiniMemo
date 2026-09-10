@@ -3,6 +3,7 @@
 
 mod commands;
 mod fonts;
+mod logging;
 mod shortcut;
 mod state;
 mod tray;
@@ -15,8 +16,6 @@ use log::{error, info, warn};
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     tauri::Builder::default()
         // 单实例必须最先注册：第二次启动应唤醒已有窗口，而不是再开一个应用
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -60,6 +59,11 @@ fn main() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // 日志要最先接管：下面每一步的失败都得留下痕迹，包括「根本没走到
+            // 这一步」。它自己拿不到目录时只是不记日志，不影响启动。
+            logging::init(&handle);
+            info!("MiniMemo {} 启动", env!("CARGO_PKG_VERSION"));
 
             // 启动顺序（规格 §21）。以下每一步失败都不得阻止应用启动 ——
             // 背景丢了、字体文件没了，都不该让用户连窗口都看不到。
@@ -106,11 +110,17 @@ fn main() {
             // Emitter，不必纠结 Window 那边的 trait 覆盖。整个应用只有一个
             // webview（label "main"），所以不需要判断来源。
             WindowEvent::Focused(focused) => {
+                // 记一笔「失焦发生过」。这里确实在主线程上写文件，但焦点变化是
+                // 人手动触发的（一次 Alt+Tab 一条），不是 Moved 那种每秒几十次
+                // 的热路径 —— 一次追加写换一条时间线，值。绝不要往这里加
+                // handle_moved 那类高频事件。
+                info!("窗口焦点{}", if *focused { "进入" } else { "离开" });
                 let _ = window.app_handle().emit("minimemo://focus-changed", *focused);
             }
             WindowEvent::CloseRequested { api, .. } => {
                 // ✕ 只隐藏，不退出。真正的退出走托盘菜单。
                 if !state::QUITTING.load(Ordering::SeqCst) {
+                    info!("窗口关闭请求被拦截，改为隐藏");
                     api.prevent_close();
                     window::hide(window.app_handle());
                 }
@@ -119,12 +129,19 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("构建 Tauri 应用失败")
-        .run(|_app, event| {
-            if let RunEvent::ExitRequested { api, .. } = event {
+        .run(|_app, event| match event {
+            // 「窗口消失」到底是收缩成了感应条，还是进程真的退了 —— 分界就在
+            // 有没有这一行。用户报的「拖窗口时程序直接关闭」正是要问这个。
+            RunEvent::ExitRequested { api, .. } => {
                 // 窗口全关了也不退出进程，否则托盘和全局快捷键会一起消失
-                if !state::QUITTING.load(Ordering::SeqCst) {
+                if state::QUITTING.load(Ordering::SeqCst) {
+                    info!("退出请求放行（用户从托盘主动退出）");
+                } else {
+                    info!("退出请求被拦截（非主动退出）");
                     api.prevent_exit();
                 }
             }
+            RunEvent::Exit => info!("进程退出"),
+            _ => {}
         });
 }

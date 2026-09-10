@@ -213,32 +213,67 @@ pub fn set_always_on_top(app: AppHandle, value: bool) -> Result<AppData, String>
     })
 }
 
+/// 把前端传来的 `reason` 拼成日志后缀。
+///
+/// `reason` 是前端为了记录而拼的短串（哪条路径、当时的判据状态），内容是我们
+/// 自己的常量，但仍然按不可信输入处理：截断长度、剔掉控制字符，免得一条日志被
+/// 塞进换行伪造出别的行。**只用于记录，不参与任何分支判断。**
+///
+/// ⚠️ 类型是 `Option<String>`，但**调用方必须把这个键传出来** ——
+/// Tauri 取参数是按 key 查 payload，键整个缺失会是 `missing_arg` 错误，而不是
+/// `None`；只有显式传 `null` 才是 `None`。`set_font` 的 `id` 就是这么用的
+/// （`option.id ?? null`）。所以这里不要靠「省略参数」来走 None 分支。
+fn fmt_reason(reason: &Option<String>) -> String {
+    match reason {
+        Some(r) => {
+            let clean: String = r.chars().filter(|c| !c.is_control()).take(120).collect();
+            format!(" [{clean}]")
+        }
+        None => String::new(),
+    }
+}
+
 #[tauri::command(async)]
-pub fn hide_window(app: AppHandle) {
+pub fn hide_window(app: AppHandle, reason: Option<String>) {
+    info!("hide_window{}", fmt_reason(&reason));
     window::hide(&app);
 }
 
 #[tauri::command(async)]
 pub fn show_window(app: AppHandle) {
+    info!("show_window");
     window::show_and_focus(&app);
 }
 
 /// 真正退出。托盘菜单调用它，标题栏的 ✕ 只会隐藏窗口。
 #[tauri::command(async)]
 pub fn quit_app(app: AppHandle) {
+    info!("quit_app（用户从托盘主动退出）");
     state::QUITTING.store(true, Ordering::SeqCst);
     app.exit(0);
 }
 
 /// 边缘态展开/收缩。前端在鼠标进出感应条时调用。
 #[tauri::command(async)]
-pub fn set_edge_collapsed(app: AppHandle, collapsed: bool) -> Result<(), String> {
+pub fn set_edge_collapsed(
+    app: AppHandle,
+    collapsed: bool,
+    reason: Option<String>,
+) -> Result<(), String> {
+    // snapped 一并记下来：没吸附时这个调用是 no-op，日志里得看得出「它什么
+    // 都没做」，否则一条「收缩了」的记录会把不存在的事件说成发生了。
+    info!(
+        "set_edge_collapsed collapsed={collapsed} snapped={}{}",
+        window::is_snapped(),
+        fmt_reason(&reason)
+    );
     window::set_edge_collapsed(&app, collapsed)
 }
 
 /// 把窗口从边缘拉回来（Esc 或托盘菜单用）。
 #[tauri::command(async)]
 pub fn unsnap_window(app: AppHandle) -> Result<(), String> {
+    info!("unsnap_window");
     window::unsnap(&app)
 }
 
@@ -247,8 +282,13 @@ pub fn unsnap_window(app: AppHandle) -> Result<(), String> {
 /// 「当前是否吸附」整个判断留在 Rust 侧，前端不参与 —— 否则前端得先问一次、
 /// 再调一次，中间那个往返窗口期里用户刚按过的 Esc 会让它拿着过期状态做错事。
 #[tauri::command(async)]
-pub fn minimize_to_edge(app: AppHandle) -> Result<(), String> {
-    if window::is_snapped() {
+pub fn minimize_to_edge(app: AppHandle, reason: Option<String>) -> Result<(), String> {
+    let snapped = window::is_snapped();
+    // 分流结果都记下来：吸附 → 缩成感应条（在用户眼里可能像「窗口消失了」），
+    // 没吸附 → 隐藏。用户报的 bug 要区分的正是这两者。
+    info!("minimize_to_edge snapped={snapped}{}", fmt_reason(&reason));
+
+    if snapped {
         window::set_edge_collapsed(&app, true)
     } else {
         window::hide(&app);
