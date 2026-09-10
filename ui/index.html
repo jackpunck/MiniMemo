@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MiniMemo</title>
+  <!--
+    必须在样式表之前、且是阻塞式普通脚本（不能是 module / defer）：
+    它要在首次绘制前把上次用的字体链写进 CSS 变量，否则会先闪一下默认字体。
+    CSP 是 script-src 'self'，所以只能放在独立文件里，不能用内联脚本。
+  -->
+  <script src="boot.js"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<!-- class="loading" 先把内容挡住，等 app.js 把字体备好再揭开，避免字体跳变 -->
+<body class="loading">
+  <!-- 自定义背景图层，始终位于内容之下 -->
+  <div id="bg" aria-hidden="true"></div>
+
+  <div id="app">
+    <header class="titlebar" data-tauri-drag-region>
+      <span class="grip" aria-hidden="true">⋯</span>
+      <span class="title">MiniMemo</span>
+      <div class="actions">
+        <button id="btn-bg" class="icon-btn" title="更换背景" aria-label="更换背景">🖼</button>
+        <button id="btn-settings" class="icon-btn" title="设置" aria-label="打开设置">⚙</button>
+        <button id="btn-pin" class="icon-btn" title="窗口置顶" aria-label="切换窗口置顶" aria-pressed="true">📌</button>
+        <button id="btn-hide" class="icon-btn" title="隐藏窗口 (Esc)" aria-label="隐藏窗口">✕</button>
+      </div>
+    </header>
+
+    <div class="input-row">
+      <input
+        id="input"
+        type="text"
+        placeholder="+ 输入今日任务，回车添加..."
+        autocomplete="off"
+        spellcheck="false"
+        aria-label="新任务">
+    </div>
+
+    <ul id="list" class="list" aria-label="今日任务"></ul>
+
+    <footer class="footer">
+      <span id="progress" class="progress">进度: 0/0</span>
+      <button id="btn-clear" class="text-btn">清空已完成</button>
+    </footer>
+  </div>
+
+  <!-- 设置面板 -->
+  <section id="settings" class="settings" hidden aria-label="设置">
+    <header class="settings-head">
+      <span>设置</span>
+      <button id="btn-settings-close" class="icon-btn" title="关闭设置" aria-label="关闭设置">✕</button>
+    </header>
+
+    <div class="settings-body">
+      <div class="field-label">便签文字字体</div>
+
+      <div class="font-current" id="font-current">默认字体</div>
+
+      <input id="font-search" class="search" type="text" placeholder="搜索字体..." autocomplete="off" aria-label="搜索字体">
+
+      <!--
+        这里刻意不用原生 <select>：在 Windows 上展开的下拉列表由系统绘制，
+        会忽略 <option> 上的 font-family，字体预览全部失效。
+      -->
+      <div id="font-list" class="font-list" role="listbox" aria-label="字体列表"></div>
+
+      <div class="settings-actions">
+        <button id="btn-font-import" class="btn">导入字体文件…</button>
+        <button id="btn-font-reset" class="btn">恢复默认字体</button>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="field-label">背景</div>
+      <div class="settings-actions">
+        <button id="btn-bg-import" class="btn">选择背景图片…</button>
+        <button id="btn-bg-reset" class="btn">恢复默认背景</button>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="field-label">快捷键</div>
+      <div class="hint" id="shortcut-hint">—</div>
+
+      <div class="field-label">数据目录</div>
+      <div class="hint path" id="data-dir">—</div>
+    </div>
+  </section>
+
+  <!-- 标准文件选择器，比原生对话框插件少一层依赖，且不涉及任何权限配置 -->
+  <input type="file" id="file-font" accept=".ttf,.otf" hidden>
+  <input type="file" id="file-bg" accept="image/png,image/jpeg,image/webp" hidden>
+
+  <div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

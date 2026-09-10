@@ -1,0 +1,14 @@
+{
+  "name": "minimemo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MiniMemo - 常驻桌面的极简今日待办浮窗",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icons": "node tools/gen-icons.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

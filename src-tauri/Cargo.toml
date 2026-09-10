@@ -1,0 +1,35 @@
+[package]
+name = "minimemo"
+version = "0.1.0"
+description = "MiniMemo - 常驻桌面的极简今日待办浮窗"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+
+# 仅用于把前端上传的字体/背景字节解码出原始二进制
+base64 = "0.22"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# 枚举系统已安装字体族。Windows 上走 DirectWrite，与 WebView2 解析 CSS font-family
+# 使用的是同一套字体库，因此返回的名字能直接用于 CSS。
+font-kit = "0.14"
+
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

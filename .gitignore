@@ -1,0 +1,9 @@
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# Node
+node_modules/
+
+# 本地数据（不应提交）
+*.broken

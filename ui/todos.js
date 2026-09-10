@@ -1,0 +1,122 @@
+// 任务列表渲染与交互。
+//
+// 安全约束（规格 §20.1）：任务文本一律通过 textContent 写入，
+// 绝不拼接 innerHTML —— 输入 `<img src=x onerror=alert(1)>` 必须原样显示。
+
+import { state, call, toast } from './state.js';
+
+function todayKey() {
+  // 跨日检查跑完之后 lastCheckDate 就等于今天，直接拿来用即可
+  return state.data.settings?.lastCheckDate || '';
+}
+
+function buildItem(todo) {
+  const li = document.createElement('li');
+  li.className = 'todo' + (todo.completed ? ' completed' : '');
+  li.dataset.id = todo.id;
+
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = !!todo.completed;
+  box.setAttribute('aria-label', todo.completed ? '标记为未完成' : '标记为已完成');
+  box.addEventListener('change', () => {
+    call('toggle_todo', { id: todo.id }).catch(() => {
+      // 失败时把勾选状态恢复成与数据一致
+      box.checked = !box.checked;
+    });
+  });
+
+  const span = document.createElement('span');
+  span.className = 'todo-text';
+  span.title = todo.text; // 被省略号截断时，悬停仍可看到全文
+
+  // 历史遗留的未完成项（创建日期早于今天）加一个轻量前缀
+  const created = todo.createdDate || '';
+  if (!todo.completed && created && created !== todayKey()) {
+    const stale = document.createElement('span');
+    stale.className = 'stale';
+    stale.textContent = `[${created.slice(5)}]`;
+    span.append(stale);
+  }
+
+  // 关键：用户输入永远走 textContent
+  span.append(document.createTextNode(todo.text));
+
+  const del = document.createElement('button');
+  del.className = 'todo-del';
+  del.textContent = '×';
+  del.title = '删除';
+  del.setAttribute('aria-label', '删除任务');
+  del.addEventListener('click', () => {
+    call('delete_todo', { id: todo.id }).catch(() => {});
+  });
+
+  li.append(box, span, del);
+  return li;
+}
+
+export function renderList() {
+  const list = document.getElementById('list');
+  const todos = state.data.todos || [];
+
+  list.replaceChildren();
+
+  if (todos.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'empty';
+    empty.textContent = '今天还没有任务';
+    list.append(empty);
+  } else {
+    for (const todo of todos) {
+      list.append(buildItem(todo));
+    }
+  }
+
+  const done = todos.filter((t) => t.completed).length;
+  document.getElementById('progress').textContent = `进度: ${done}/${todos.length}`;
+
+  const clearBtn = document.getElementById('btn-clear');
+  clearBtn.disabled = done === 0;
+}
+
+export function initTodos() {
+  const input = document.getElementById('input');
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+
+    const text = input.value.trim();
+    if (!text) {
+      // 空输入按 Enter 不做任何事，也不给出错提示
+      input.value = '';
+      return;
+    }
+
+    // 先清空再发送：添加是高频操作，等 IPC 往返再清空会有肉眼可见的迟滞
+    input.value = '';
+
+    call('add_todo', { text }).catch(() => {
+      // 失败时把内容还给用户，避免白打一遍
+      input.value = text;
+      toast('添加失败，内容已保留');
+    });
+  });
+
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    if ((state.data.todos || []).some((t) => t.completed)) {
+      call('clear_completed').catch(() => {});
+    }
+  });
+}
+
+export function focusInput() {
+  const input = document.getElementById('input');
+  input.focus();
+  // 保持在末尾，符合「继续输入」的直觉
+  const len = input.value.length;
+  try {
+    input.setSelectionRange(len, len);
+  } catch {
+    /* 忽略：某些状态下标点设置会抛错，但不影响聚焦 */
+  }
+}
