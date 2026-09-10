@@ -4,6 +4,7 @@
 // 绝不拼接 innerHTML —— 输入 `<img src=x onerror=alert(1)>` 必须原样显示。
 
 import { state, call, toast } from './state.js';
+import { initDrag, cancelDrag } from './dnd.js';
 
 function todayKey() {
   // 跨日检查跑完之后 lastCheckDate 就等于今天，直接拿来用即可
@@ -59,6 +60,11 @@ export function renderList() {
   const list = document.getElementById('list');
   const todos = state.data.todos || [];
 
+  // 兜底：整表重建会把正在拖的那一行从 DOM 摘掉，pointer capture 随之隐式
+  // 释放，之后 pointerup 就再也收不到了。正常路径上 app.js 会跳过拖动中的
+  // 重绘，这里是防止有别的调用方绕过去。
+  cancelDrag();
+
   list.replaceChildren();
 
   if (todos.length === 0) {
@@ -81,6 +87,8 @@ export function renderList() {
 
 export function initTodos() {
   const input = document.getElementById('input');
+
+  initDrag(document.getElementById('list'));
 
   input.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;

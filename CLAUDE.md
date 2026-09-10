@@ -4,9 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目状态
 
-MiniMemo 的完整实现已经落地（Rust + Tauri 2.x 后端、vanilla JS 前端），但**尚未编译验证过** —— 这台机器上没有安装 Rust 工具链（`rustc`/`cargo` 均不存在，`~/.rustup` 也不存在），因此没有任何一次 `cargo check` 或 `cargo tauri dev` 成功跑过。前端 JS 通过了 `node --check` 的语法校验，配置文件通过了 JSON 解析校验。
+MiniMemo 的完整实现已经落地（Rust + Tauri 2.x 后端、vanilla JS 前端）。
 
-代码又经过一轮对照 Tauri 2.x 实际源码的静态复查，修掉了 1 个确认的编译错误（`TrayIcon::menu()` 并不存在）和 3 个逻辑 bug（右侧解除吸附越界、并发 invoke 丢失更新、主线程同步落盘）。这类复查能挡住 API 误用和并发问题，但**替代不了编译**：trait 约束、泛型实例化、`Send`/`Sync` 之类只有 `cargo check` 说了算。首次编译仍预期会遇到 API 细节修正。
+**这台开发机没有 Rust 工具链**（`rustc`、`cargo`、`~/.rustup` 都不存在），所以本机跑不了 `cargo check`。编译验证走 CI（[.github/workflows/build.yml](.github/workflows/build.yml)）：push 到 main 触发 `cargo check --all-targets` + `cargo test`，打 tag 或手动触发才出包。
+
+要分清「CI 绿过」和「验证过了」。拖动排序、文字颜色、外观设置这一批改动是后来加的，此前 CI 的状态不能代表它。更要紧的是 **`cargo check` 不链接、不打包、也从不运行程序**，而**程序本身从来没有被真正执行过一次** —— 透明窗口、边缘吸附的命中测试、托盘、全局快捷键、字体渲染全都未经验证。规格 §34 第 6 条：不要因为 CI 绿了就当产品完成。要确认 CI 的实际结果，去仓库的 Actions 页面看，别信文档里的转述。
+
+静态复查能挡住 API 误用（比如修掉的 `TrayIcon::menu()` 并不存在）和并发问题，但**替代不了编译**：trait 约束、泛型实例化、`Send`/`Sync` 之类只有 `cargo check` 说了算。
 
 [docs/MiniMemo_AGENT_SPEC.md](docs/MiniMemo_AGENT_SPEC.md) 是实现基准和行为契约。注意规格里出现的配置片段、API 名多为示意，一律以当前 Tauri 2.x 实际 schema/API 为准（规格 §34.8 也如此要求）。
 
@@ -63,7 +67,21 @@ cargo test
 
 规格 §25 里还有个 `background.rs`，实际实现把背景逻辑放进了 `commands.rs`，没有单独成文件。
 
-## 五个关键机制
+### 改数据模型之前必读
+
+**给 `Todo` / `Settings` 加字段时，少一个 `#[serde(default)]` 就能清空用户的全部待办。** 这是这个仓库最容易犯、后果最重的错误，而且编译期毫无征兆。
+
+三个必须记住的点：
+
+1. **容器级和字段级的 `default` 语义不同，不能混用。** 字段级 `#[serde(default)]` 取的是**该字段类型**的 `Default`（`String` 就是空串），容器级才是取 `impl Default for 该结构体` 里的值。`Settings.text_color` 故意只靠容器级，就是为了拿到 `DEFAULT_TEXT_COLOR` 而不是空串。
+2. **`AppData` 上的 `default` 不会保护 `Settings` 内部的字段。** 它只在 `settings` 整个键缺失时才生效。现存用户的 `data.json` 个个都有 `settings`、个个都没有新字段 —— 这正是出错的那条路径。
+3. **`load()` 解析失败的处理是 `backup_broken()` + 返回默认数据**（[state.rs](src-tauri/src/state.rs) 的 `load`）。文件被改名成 `.broken`，用户看到的是所有待办凭空消失。**任何解析失败都表现为「用户的活儿没了」**，所以这类改动必须配单元测试 —— `state.rs` 的 `legacy_settings_without_text_color_still_parses` 就是这个用途的回归测试。
+
+另外，**新增字段的默认值必须让老数据的行为保持不变**。`Todo.order` 默认 0 是个恒等键，排序仍落回 `created_at` 倒序，与加字段前一模一样；如果给它一个非 0 的默认值，所有老任务的相对顺序都会被打乱。
+
+数据版本变迁写在 `migrate()` 里。覆盖老用户的值之前，先确认那个值不可能是用户的真实选择（v1→v2 重置 `mask_opacity` 之所以安全，是因为前端从来没读过这个字段，磁盘上的 0.65 只是初始默认值）。
+
+## 几个关键机制
 
 这几处需要同时理解数据层、窗口层和 UI 层：
 
@@ -76,6 +94,23 @@ cargo test
 4. **字体系统**（[fonts.rs](src-tauri/src/fonts.rs) + [ui/fonts.js](ui/fonts.js)）。系统字体走 `font-kit`（Windows 上即 DirectWrite，与 WebView2 解析 CSS `font-family` 用的是同一套库）；导入字体走「复制进 app data → 读字节 → `new FontFace(family, ArrayBuffer)`」。**不要改成 `@font-face { src: url(...) }`** —— 那要么依赖 `file://`（被 WebView2 的 origin 隔离挡掉），要么需要开启 asset protocol 并放宽 CSP，而且字体请求是 CORS 模式的，跨 origin 能否通过并不确定。当前方案不发起任何请求，因此无需任何安全配置变更。
 
 5. **首屏字体引导**（[ui/boot.js](ui/boot.js)）。设置存在 Rust 侧、只能异步取，等它回来时页面早画完了，会闪一下默认字体。`boot.js` 在 `<head>` 里同步读 localStorage 缓存并写 CSS 变量。它**必须是阻塞式普通脚本**（不能是 `module` / `defer`），CSP 是 `script-src 'self'` 所以也不能写成内联脚本。
+
+6. **拖动排序**（[ui/dnd.js](ui/dnd.js) + [state.rs](src-tauri/src/state.rs) 的 `Todo.order`）。三个坑：
+
+   - **不能在 `pointerdown` 里就 `setPointerCapture`。** 一旦捕获，`click` 会被重定向到 `li`，用户在勾选框上按下再轻微抖动，勾选就失效了。只有位移越过阈值、确认意图是拖动之后才接管指针。
+   - **`renderList()` 的 `replaceChildren()` 会在拖动中途把正在拖的 `li` 从 DOM 摘掉**，元素一移除 pointer capture 就隐式释放，`pointerup` 再也收不到，`reorder_todos` 永远不会被调用。所以 [ui/app.js](ui/app.js) 的 `render()` 在拖动中要整轮跳过，`renderList()` 开头再加 `cancelDrag()` 兜底。
+   - **几何算的是未完成项**。未完成项由 `sort_todos` 保证连续排在前面，拖动也只在这段内换位 —— 已完成项永远沉底，跨不过那条边界。位移折算依赖「每行严格等高」（`.todo` 无 margin、`.list` 无 gap、`.todo-text` 强制 `nowrap`），给其中任何一个加 margin / gap / line-height 都会让换位算错。
+
+   `reorder_todos` 只收**未完成**的 id，未列出的接末尾并保持原相对次序 —— 这样并发新增或归档过的残缺列表只会降级，不会报错、不会交错。赋值结果必须是 `sort_todos` 的不动点，否则 `mutate` 结尾那次排序会把结果打乱。
+
+7. **背景可读性与外观变量**（[ui/appearance.js](ui/appearance.js) + [styles.css](ui/styles.css)）。原来自定义图片是糊的，根因是 `#app` 上的 `backdrop-filter` 在模糊**整个窗口背后**的东西。现在图片模式强制关掉它，改由文字投影 + 颜色选择撑对比度。
+
+   两条必须记住的约束：
+
+   - **用户的文字颜色只写 `--note-*`，绝不碰 `--text` / `--text-dim` / `--text-faint`。** 后者是窗口 chrome（标题栏、设置面板、toast、字体列表）的固定配色 —— 把它们一起改掉，用户选了深色之后设置面板会变成深底深字，**再也改不回来**。
+   - **遮罩浓度只能有一层来源。** 有图片时 `#app` 的 background 必须是 `transparent`、`backdrop-filter` 必须是 `none`，否则会和 `#bg.visible::after` 叠成 `0.25 + 0.75×α`，滑块的读数对不上眼睛看到的东西。同理，无图片时 `#app` 用的是另一个变量 `--app-mask`（固定 0.65），不是 `--mask`（图片遮罩，滑块驱动）—— 混用会让「调图片遮罩」意外改掉默认的亚克力观感。
+
+   投影方向随文字颜色的亮度自动反转（亮字配暗影、暗字配亮光晕）。少了这一步，用户在暗背景图上选深色正文会比默认白字还难读 —— 颜色选择就从解决问题的工具变成了制造问题的工具。两个滑块互斥：有图片时只显示「背景遮罩」（模糊被 CSS 强制关掉），无图片时只显示「背景模糊」（没有图片可遮）。
 
 ## 不可违反的行为约定
 

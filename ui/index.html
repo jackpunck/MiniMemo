@@ -25,6 +25,8 @@
         <button id="btn-bg" class="icon-btn" title="更换背景" aria-label="更换背景">🖼</button>
         <button id="btn-settings" class="icon-btn" title="设置" aria-label="打开设置">⚙</button>
         <button id="btn-pin" class="icon-btn" title="窗口置顶" aria-label="切换窗口置顶" aria-pressed="true">📌</button>
+        <!-- 图标用 U+2014 而不是 ⤡ 之类的箭头：Segoe UI 里那些很可能是豆腐块 -->
+        <button id="btn-min" class="icon-btn" title="最小化（收缩到屏幕边缘）" aria-label="最小化">—</button>
         <button id="btn-hide" class="icon-btn" title="隐藏窗口 (Esc)" aria-label="隐藏窗口">✕</button>
       </div>
     </header>
@@ -78,6 +80,30 @@
       <div class="settings-actions">
         <button id="btn-bg-import" class="btn">选择背景图片…</button>
         <button id="btn-bg-reset" class="btn">恢复默认背景</button>
+      </div>
+
+      <div class="field-label">文字颜色</div>
+      <!-- 色块由 appearance.js 的 TEXT_COLORS 生成，这里只留容器 -->
+      <div id="color-swatches" class="swatches" role="radiogroup" aria-label="文字颜色"></div>
+
+      <!--
+        这两行是互斥的，appearance.js 会按当前有没有自定义图片切换：
+        没有图片时只有「背景模糊」生效（遮罩没有东西可遮），
+        有图片时模糊被 CSS 强制关掉，只有「背景遮罩」生效。
+        每个控件都只在真正管用时出现，不留拖了没反应的死控件。
+      -->
+      <div class="field-label" id="mask-label">背景遮罩</div>
+      <div class="slider-row" id="mask-row">
+        <input id="mask-opacity" class="range" type="range" min="0" max="90" step="1"
+               aria-label="背景遮罩浓度">
+        <span id="mask-opacity-value" class="slider-value">28%</span>
+      </div>
+
+      <div class="field-label" id="blur-label">背景模糊</div>
+      <div class="slider-row" id="blur-row">
+        <input id="blur-level" class="range" type="range" min="0" max="20" step="1"
+               aria-label="背景模糊强度">
+        <span id="blur-level-value" class="slider-value">6px</span>
       </div>
 
       <div class="divider"></div>
