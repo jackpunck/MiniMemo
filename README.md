@@ -43,6 +43,11 @@ CSS `font-family` 用的是同一套字体库,所以列出来的名字一定能�
 
 ## 环境要求
 
+> **这一节只约束「谁来编译」,不约束「谁来使用」。**
+> 最终用户拿到的是 `MiniMemo_0.1.0_x64-setup.exe`,双击安装即可,机器上
+> **不需要装 Rust、不需要装 Node、也不需要装 .NET**。下面三样只是构建机的要求,
+> 而且第 3 项在 Win11 上本来就自带。
+
 Tauri 2.x 在 Windows 上需要三样东西:
 
 1. **Rust 工具链**(MSVC 目标)
@@ -91,7 +96,34 @@ cargo tauri build
 可选功能,否则会在 `light.exe` 阶段失败。
 
 生成便携版:把 `target/release/MiniMemo.exe` 单独拷出来即可运行 —— 应用不写
-注册表,数据只落在下面的数据目录里。
+注册表,数据只落在下面的数据目录里。前提是目标机器有 WebView2 Runtime
+(Win11 自带,Win10 装过新版 Edge 的也有)。Tauri 2 在 Windows 上静态链接了
+WebView2 loader,按理不需要额外的 DLL,但**这一点还没实机验证过** ——
+要严格保证「拷过去就能跑」,先在一台干净的机器上试一次。
+
+### 不装 Rust 就出包(GitHub Actions)
+
+上面那套工具链只是这一种选择。如果不想在本机装,可以让 CI 去编译 ——
+[.github/workflows/build.yml](.github/workflows/build.yml) 已经配好了:
+
+1. 在 GitHub 上建一个仓库,把本项目推上去。**本仓库目前还没有配 remote**,
+   所以要先把 `git remote add origin <你的仓库地址>` 补上。
+2. 推送后 workflow 会自动跑 `cargo check` + `cargo test`(不出包,只为快速反馈)。
+3. 想拿安装包:在 Actions 页面手动触发一次(Run workflow),跑完在该次运行的
+   Artifacts 里下载 `MiniMemo-安装包`。
+4. 或者推一个 tag:
+
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+   会自动建 Release 并把安装包和便携版挂上去 —— 那个页面链接就是可以直接
+   发给别人的东西。
+
+> 首次跑**大概率会失败**。这个仓库的 Rust 代码从未编译验证过(开发机没有
+> Rust 工具链),CI 的第一次 `cargo check` 就是我们第一次能看到真实编译报错的
+> 地方。这正是把它放在 `build` 之前、并且不加 `--locked` 的原因。
 
 ### 图标
 

@@ -7,11 +7,12 @@
 //! 放在主线程上会卡住窗口。
 
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use base64::Engine;
 use log::{info, warn};
 use serde::Serialize;
-use tauri::{ipc::Response, AppHandle, Manager};
+use tauri::{ipc::Response, AppHandle};
 
 use crate::fonts;
 use crate::state::{self, AppData, Position};
@@ -20,12 +21,32 @@ use crate::window;
 /// 背景图片的体积上限。
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 
+/// 串行化「读 → 改 → 写」。
+///
+/// 每个 command 都标了 `#[tauri::command(async)]`，Tauri 会把它们派发到多线程
+/// 运行时上，所以两次 invoke 是真并行的。而 `state::load` 和 `state::save` 是两个
+/// 独立步骤，且落盘写的是整份 `AppData`：两个命令同时从同一份快照出发，后落盘的
+/// 那个会把前一个的改动整份覆盖掉。前端有若干不 await 就连发的调用（勾选框、
+/// 连按两次回车），所以这不是理论问题。
+///
+/// 锁必须一直持到 `save` 返回 —— 松手太早就等于没锁。
+/// 临界区里含 fsync，不能从主线程进来；拖动窗口那条路径已经把落盘丢到后台线程了
+/// （见 `window::save_position_throttled`）。锁中毒时直接取回数据继续用：这个应用
+/// 宁可带着上一位的状态往前走，也不该在一次 panic 之后彻底打不开。
+static DATA_LOCK: Mutex<()> = Mutex::new(());
+
 // ---------------------------------------------------------------------------
 // 辅助
 // ---------------------------------------------------------------------------
 
+fn data_guard() -> std::sync::MutexGuard<'static, ()> {
+    DATA_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 读取当前状态，顺带执行跨日检查与排序。
 fn current(app: &AppHandle) -> AppData {
+    let _guard = data_guard();
+
     let mut data = state::load(app);
 
     if state::rollover(&mut data) > 0 {
@@ -43,6 +64,8 @@ fn mutate<F>(app: &AppHandle, f: F) -> Result<AppData, String>
 where
     F: FnOnce(&mut AppData) -> Result<(), String>,
 {
+    let _guard = data_guard();
+
     let mut data = state::load(app);
     state::rollover(&mut data);
     f(&mut data)?;

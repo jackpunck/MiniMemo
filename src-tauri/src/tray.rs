@@ -4,6 +4,7 @@
 //! 这样才能保住后台驻留和全局快捷键。
 
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use log::{info, warn};
 use tauri::{
@@ -15,6 +16,13 @@ use tauri::{
 use crate::{state, window};
 
 const TRAY_ID: &str = "minimemo-tray";
+
+/// 「窗口置顶」复选框的句柄。
+///
+/// Tauri 2 的 `TrayIcon` 只有 `set_menu`，没有 `menu()` getter —— 菜单一旦建好就
+/// 拿不回来了，`AppHandle::menu()` 取的是应用菜单（这里根本没设过），不是托盘菜单。
+/// 所以勾选状态只能自己留一份句柄来回写。`CheckMenuItem` 本身就是可克隆的轻量句柄。
+static ONTOP_ITEM: Mutex<Option<CheckMenuItem<tauri::Wry>>> = Mutex::new(None);
 
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let always_on_top = state::load(app).settings.always_on_top;
@@ -29,6 +37,9 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
         always_on_top,
         None::<&str>,
     )?;
+    // 留下来用于回写勾选状态，见 ONTOP_ITEM 的说明
+    *ONTOP_ITEM.lock().unwrap() = Some(ontop_i.clone());
+
     let bg_i = MenuItem::with_id(app, "reset_bg", "恢复默认背景", true, None::<&str>)?;
     let font_i = MenuItem::with_id(app, "reset_font", "恢复默认字体", true, None::<&str>)?;
     let settings_i = MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
@@ -107,14 +118,8 @@ fn toggle_always_on_top(app: &AppHandle) {
     }
 
     // 回写勾选状态
-    if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        if let Some(menu) = tray.menu() {
-            if let Some(item) = menu.get("ontop") {
-                if let Some(check) = item.as_check_menuitem() {
-                    let _ = check.set_checked(next);
-                }
-            }
-        }
+    if let Some(check) = ONTOP_ITEM.lock().unwrap().as_ref() {
+        let _ = check.set_checked(next);
     }
 }
 

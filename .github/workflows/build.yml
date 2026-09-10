@@ -1,0 +1,112 @@
+name: 构建
+
+# 这个仓库的代码从未被编译验证过（开发机没有 Rust 工具链）。
+# 所以第一个 job 先只做 cargo check —— 它是我们第一次能拿到真实编译报错的地方，
+# 而且比完整打包快得多、错也更好读。出包放在第二个 job，只在打 tag 或手动触发时跑。
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支连续推送时，取消上一次还没跑完的任务
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 类型检查：日常反馈靠这个
+  # ---------------------------------------------------------------------------
+  check:
+    name: cargo check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 格式是「工作区路径 -> 产物目录」
+          workspaces: "src-tauri -> target"
+
+      # 不加 --locked：仓库里还没有 Cargo.lock（本地没有 cargo，生成不了）。
+      # 首次本地构建成功后，建议把 Cargo.lock 提交进来，再把 --locked 打开。
+      - name: cargo check
+        working-directory: src-tauri
+        run: cargo check --all-targets
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+  # ---------------------------------------------------------------------------
+  # 出包：打 tag 或手动触发
+  # ---------------------------------------------------------------------------
+  build:
+    name: 打包
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    permissions:
+      # 打 tag 时创建 Release 需要它
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      # 仓库里没有 package-lock.json，所以只能 npm install（npm ci 会直接报错）。
+      # 这一句只是为了拿到 @tauri-apps/cli，没有前端构建步骤。
+      - name: 安装 Tauri CLI
+        run: npm install
+
+      - name: 打包
+        run: npm run build
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMemo-安装包
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: 上传便携版
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiniMemo-便携版
+          path: src-tauri/target/release/MiniMemo.exe
+          if-no-files-found: error
+
+      # 推一个 v0.1.0 这样的 tag，就把安装包挂到 Release 上 —— 那个页面链接
+      # 就是可以直接发给别人的东西
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/MiniMemo.exe
+          generate_release_notes: true

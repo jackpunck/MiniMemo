@@ -51,6 +51,10 @@ pub enum Edge {
     Right,
 }
 
+/// 解除吸附时往屏幕内侧让开的距离（物理像素）。
+/// 不让开的话，刚恢复的完整宽度会立刻又被判定成贴边、重新吸附回去。
+const SNAP_MARGIN: i32 = 40;
+
 fn main_window(app: &AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window("main")
 }
@@ -275,7 +279,7 @@ pub fn unsnap(app: &AppHandle) -> Result<(), String> {
 }
 
 fn release_snap(w: &WebviewWindow) {
-    let had = SNAPPED.lock().unwrap().take().is_some();
+    let edge = SNAPPED.lock().unwrap().take();
 
     let Ok(size) = w.outer_size() else { return };
     let Ok(pos) = w.outer_position() else { return };
@@ -283,15 +287,50 @@ fn release_snap(w: &WebviewWindow) {
     let scale = w.scale_factor().unwrap_or(1.0);
     let full_w = (WIDTH as f64 * scale).round() as i32;
 
-    if had || size.width as i32 != full_w {
-        // 恢复宽度，并整体往屏幕内侧挪一点，避免立刻又被判定为贴近边缘
-        set_size(w, full_w, size.height as i32);
-        let mon = monitor_of(w);
-        let inward = mon
-            .map(|m| (m.position().x + 40).max(pos.x))
-            .unwrap_or(pos.x);
-        set_position(w, inward, pos.y);
+    // 收缩态是就地改宽度、不动位置，所以恢复时要按原样长回去。
+    let collapsed = (size.width as i32) < full_w;
+    if edge.is_none() && !collapsed {
+        // 宽度本来就是满的 —— 说明用户是自己把窗口拖离边缘的，位置不能动
+        return;
     }
+
+    let mon = monitor_of(w);
+    let mon_left = mon.as_ref().map(|m| m.position().x);
+    let mon_right = mon
+        .as_ref()
+        .map(|m| m.position().x + m.size().width as i32);
+
+    // 恢复宽度必须以「当前贴边的那条边」为锚，往屏幕内侧长，而不是沿用 pos.x。
+    // 右侧吸附时 cur_right 就等于 mon_right，直接沿用 pos.x 会把 280px 宽的窗口
+    // 顶到屏幕外（只留感应条那十来像素可见）。左侧则恰好相反，x 不变才是对的。
+    let cur_right = pos.x + size.width as i32;
+
+    let x = match edge {
+        Some(Edge::Right) => {
+            let anchored = cur_right - full_w;
+            // 展开后仍然贴着右缘（或已经出界）才需要让位；
+            // 取不到显示器信息时按「贴着」处理，宁可往内让也不要留在屏幕外。
+            let hugging = collapsed || mon_right.map_or(true, |r| cur_right >= r - SNAP_MARGIN);
+            if hugging {
+                mon_left.map_or(anchored, |l| (anchored - SNAP_MARGIN).max(l))
+            } else {
+                pos.x
+            }
+        }
+        Some(Edge::Left) => {
+            let hugging = collapsed || mon_left.map_or(true, |l| pos.x <= l + SNAP_MARGIN);
+            if hugging {
+                mon_left.map_or(pos.x, |l| l + SNAP_MARGIN)
+            } else {
+                pos.x
+            }
+        }
+        // 没有吸附记录时只把宽度还回去
+        None => pos.x,
+    };
+
+    set_size(w, full_w, size.height as i32);
+    set_position(w, x, pos.y);
 }
 
 /// 收紧成一条感应条 / 从感应条展开。
@@ -341,10 +380,6 @@ pub fn set_edge_collapsed(app: &AppHandle, collapsed: bool) -> Result<(), String
     Ok(())
 }
 
-pub fn is_snapped() -> bool {
-    SNAPPED.lock().unwrap().is_some()
-}
-
 // ---------------------------------------------------------------------------
 // 位置持久化
 // ---------------------------------------------------------------------------
@@ -361,9 +396,16 @@ fn save_position_throttled(app: &AppHandle, x: i32, y: i32) {
     *last = Some(now);
     drop(last);
 
-    if let Err(e) = crate::commands::save_window_position(app.clone(), x, y) {
-        warn!("保存窗口位置失败: {e}");
-    }
+    // 这里跑在 `WindowEvent::Moved` 的回调里，也就是主线程上。
+    // `#[tauri::command(async)]` 只改变 IPC 的派发方式，宏生成的原函数体仍是同步的，
+    // 直接调用就等于在主线程上做「读盘 → 解析 → 写盘 → fsync」，
+    // 拖动窗口时每 600ms 卡一下。丢到后台线程去，顺带也不占用 DATA_LOCK 的主线程。
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = crate::commands::save_window_position(app, x, y) {
+            warn!("保存窗口位置失败: {e}");
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
