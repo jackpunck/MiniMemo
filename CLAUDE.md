@@ -6,11 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MiniMemo 的完整实现已经落地（Rust + Tauri 2.x 后端、vanilla JS 前端）。
 
-**这台开发机没有 Rust 工具链**（`rustc`、`cargo`、`~/.rustup` 都不存在），所以本机跑不了 `cargo check`。编译验证走 CI（[.github/workflows/build.yml](.github/workflows/build.yml)）：push 到 main 触发 `cargo check --all-targets` + `cargo test`，打 tag 或手动触发才出包。
+**这台开发机没有 Rust 工具链**（`rustc`、`cargo`、`~/.rustup` 都不存在），所以本机跑不了 `cargo check`。编译验证走 CI（[.github/workflows/build.yml](.github/workflows/build.yml)）的 `check` job：`cargo check --all-targets` + `cargo test`。
 
-要分清「CI 绿过」和「验证过了」。拖动排序、文字颜色、外观设置这一批改动是后来加的，此前 CI 的状态不能代表它。更要紧的是 **`cargo check` 不链接、不打包、也从不运行程序**，而**程序本身从来没有被真正执行过一次** —— 透明窗口、边缘吸附的命中测试、托盘、全局快捷键、字体渲染全都未经验证。规格 §34 第 6 条：不要因为 CI 绿了就当产品完成。要确认 CI 的实际结果，去仓库的 Actions 页面看，别信文档里的转述。
+触发条件有个坑：`push` **只监听 `main` 和 `v*` tag**，往别的分支推不会跑任何东西。要拿反馈就开一个到 `main` 的 PR（`pull_request` 会触发），或者手动 `workflow_dispatch`。出包只看 tag 或手动触发。
+
+要分清「CI 绿过」和「验证过了」。**`cargo check` 不链接、不打包、也从不运行程序**，而**程序本身从来没有被真正执行过一次** —— 透明窗口、边缘吸附的命中测试、托盘、全局快捷键、字体渲染全都未经验证。规格 §34 第 6 条：不要因为 CI 绿了就当产品完成。要确认 CI 的实际结果，去仓库的 Actions 页面看，别信文档里的转述。
 
 静态复查能挡住 API 误用（比如修掉的 `TrayIcon::menu()` 并不存在）和并发问题，但**替代不了编译**：trait 约束、泛型实例化、`Send`/`Sync` 之类只有 `cargo check` 说了算。
+
+当前状态：拖动排序、文字颜色、外观设置这一批（PR #1）已经在 CI 上跑过 `cargo check --all-targets` 与 `cargo test`（10 个测试全绿）。**这代表它能编译、解析逻辑有回归测试兜着，不代表它在桌面上是好的。**
 
 [docs/MiniMemo_AGENT_SPEC.md](docs/MiniMemo_AGENT_SPEC.md) 是实现基准和行为契约。注意规格里出现的配置片段、API 名多为示意，一律以当前 Tauri 2.x 实际 schema/API 为准（规格 §34.8 也如此要求）。
 
